@@ -1,13 +1,12 @@
 spring:
   application:
     name: reservation-api
+  profiles:
+    default: dev
   threads:
     virtual:
       enabled: true
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/reservations}
-    username: ${DB_USER:reservations}
-    password: ${DB_PASSWORD:reservations}
     hikari:
       maximum-pool-size: 15
       minimum-idle: 10

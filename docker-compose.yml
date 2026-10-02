@@ -5,6 +5,7 @@ services:
       POSTGRES_DB: reservations
       POSTGRES_USER: reservations
       POSTGRES_PASSWORD: reservations
+    ports: ["5432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U reservations"]
       interval: 2s
@@ -13,9 +14,9 @@ services:
     build: .
     ports: ["8080:8080"]
     environment:
-      DB_URL: jdbc:postgresql://db:5432/reservations
-      DB_USER: reservations
-      DB_PASSWORD: reservations
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/reservations
+      SPRING_DATASOURCE_USERNAME: reservations
+      SPRING_DATASOURCE_PASSWORD: reservations
     mem_limit: 512m
     depends_on:
       db:
