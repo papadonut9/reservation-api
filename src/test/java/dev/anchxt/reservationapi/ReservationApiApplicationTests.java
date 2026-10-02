@@ -2,12 +2,25 @@ package dev.anchxt.reservationapi;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 
 @SpringBootTest
+@Import(ReservationApiApplicationTests.Db.class)
 class ReservationApiApplicationTests {
 
-    @Test
-    void contextLoads() {
+  @TestConfiguration(proxyBeanMethods = false)
+  static class Db {
+    @Bean
+    @ServiceConnection
+    PostgreSQLContainer postgres() {
+      return new PostgreSQLContainer("postgres:16-alpine");
     }
+  }
 
+  @Test
+  void contextLoads() {}
 }
