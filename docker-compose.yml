@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: reservations
+      POSTGRES_USER: reservations
+      POSTGRES_PASSWORD: reservations
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reservations"]
+      interval: 2s
+      retries: 15
+  app:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/reservations
+      DB_USER: reservations
+      DB_PASSWORD: reservations
+    mem_limit: 512m
+    depends_on:
+      db:
+        condition: service_healthy
