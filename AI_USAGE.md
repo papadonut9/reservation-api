@@ -14,3 +14,11 @@
 - Directed: ticket scope (HS256, `sub`=user, `role` claim, dev token endpoint, public actuator paths).
 - AI decided: Boot `authorities-claim-name`/`authority-prefix` properties over a custom converter; dev endpoint gated by `DEV_TOKEN_ENABLED` (default off) and accepts any `sub` since there is no users table; `/error` permitted so validation 400s aren't masked as 401; compose ships a placeholder `JWT_SECRET` so clean-clone `docker compose up` works.
 - Deferred: "spoofed body user_id" test moves to the reserve endpoint ticket; no endpoint takes a body yet.
+
+## IMS-31 POST /shows
+- Directed: ticket scope (admin-only create, batch seat insert, 400 on duplicate/empty seats and price <= 0), no direct commits.
+- AI decided: no Flyway migration existed yet, so `schema/schema.sql` became `db/migration/V1__init.sql` (+ Flyway deps) and `price_paise` CHECK tightened to `> 0`; seats seeded with one `unnest(?::text[])` insert in the same tx as the show row; plain `JdbcClient`, no entity/repository; seat list capped at 100k; INFO audit line (id, seat count, price, admin sub) logged after commit via `TransactionTemplate`, per the no-logging-inside-tx rule.
+- Directed: seats are labels per spec (`"A1"`), not integers.
+- AI decided: kept column name `seat_no` (matches CLAUDE.md SQL), type `TEXT COLLATE "C"` so DB byte order/equality matches Java sort and dedupe; labels limited to `[A-Za-z0-9-]{1,99}` in both the request and the DB CHECK; edited V1 in place since it was never committed or merged.
+- Directed: log rejected (401/403) requests too. AI decided: wrap the default bearer entry point and access-denied handler in `SecurityConfig` with a WARN line (method, path, reason or `sub`; never the token), since those requests stop in the filter chain before any controller; tests pin `spring.flyway.enabled=true` so a local gitignored `application-dev.yml` cannot switch migrations off.
+- Open for human: per-show `per_user_limit` is not in the request, schema default 4 applies.
