@@ -2,7 +2,7 @@
 
 ```mermaid
 erDiagram
-    shows ||--o{ seats : "has (seeded 1..total_seats)"
+    shows ||--o{ seats : "has (seeded from POST /shows labels)"
     shows ||--o{ reservations : "for"
     shows ||--o{ user_show_quota : "limits"
     reservations |o--o{ seats : "owns via reservation_id"
@@ -16,7 +16,7 @@ erDiagram
     }
     seats {
         bigint show_id PK,FK
-        int seat_no PK "INT for deterministic lock order"
+        text seat_no PK "label e.g. A1, COLLATE C, len 1..99"
         text status "ck_seats_status AVAILABLE|HELD|CONFIRMED"
         uuid reservation_id FK "NULL iff AVAILABLE"
     }

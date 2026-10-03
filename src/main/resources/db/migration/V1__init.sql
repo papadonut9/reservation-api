@@ -1,4 +1,4 @@
--- DRAFT (IMS-29). Plain SQL, not a Flyway migration. Postgres 16.
+-- V1 (IMS-29 draft, applied by Flyway from IMS-31). Postgres 16.
 -- Money: BIGINT paise only. Lock order everywhere: idempotency -> quota -> seats.
 -- Status values are CHECKs, not lookup tables: an FK to a status row would
 -- KEY SHARE-lock that one row on every seat claim (hot row under burst).
@@ -6,7 +6,7 @@
 CREATE TABLE shows (
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name           TEXT   NOT NULL,
-    price_paise    BIGINT NOT NULL CHECK (price_paise >= 0),
+    price_paise    BIGINT NOT NULL CHECK (price_paise > 0),
     per_user_limit INT    NOT NULL DEFAULT 4 CHECK (per_user_limit > 0),
     total_seats    INT    NOT NULL CHECK (total_seats > 0)   -- immutable; invariant target
 );
@@ -28,7 +28,7 @@ CREATE TABLE reservations (
 -- reservation_id -> NULL. Seat history is not kept (audit out of scope).
 CREATE TABLE seats (
     show_id        BIGINT NOT NULL REFERENCES shows (id),
-    seat_no        INT    NOT NULL CHECK (seat_no > 0),     -- INT: deterministic lock order
+    seat_no        TEXT   COLLATE "C" NOT NULL CHECK (seat_no ~ '^[A-Za-z0-9-]{1,99}$'),
     status         TEXT   NOT NULL DEFAULT 'AVAILABLE'
                           CONSTRAINT ck_seats_status CHECK (status IN ('AVAILABLE', 'HELD', 'CONFIRMED')),
     reservation_id UUID   REFERENCES reservations (id),
