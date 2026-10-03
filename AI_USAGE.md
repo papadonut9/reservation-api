@@ -9,3 +9,8 @@
 - Directed: ER diagram and schema shape authored by human; AI asked to validate.
 - AI flagged: quota upsert INSERT branch bypasses limit, status lookup-table FKs lock a hot row, replay-after-cancel loses seat list, append-only seats breaks atomic claim.
 - Decided by human: CHECK constraints over status tables, `max_held` copied into quota row, in-place cancel (no seat history; audit out of scope), length caps on JWT sub and idempotency key, keep `user_show_quota` as the per-user lock point.
+
+## IMS-30 auth
+- Directed: ticket scope (HS256, `sub`=user, `role` claim, dev token endpoint, public actuator paths).
+- AI decided: Boot `authorities-claim-name`/`authority-prefix` properties over a custom converter; dev endpoint gated by `DEV_TOKEN_ENABLED` (default off) and accepts any `sub` since there is no users table; `/error` permitted so validation 400s aren't masked as 401; compose ships a placeholder `JWT_SECRET` so clean-clone `docker compose up` works.
+- Deferred: "spoofed body user_id" test moves to the reserve endpoint ticket; no endpoint takes a body yet.

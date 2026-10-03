@@ -13,6 +13,18 @@ spring:
       connection-timeout: 2000
   jpa:
     open-in-view: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          authorities-claim-name: role
+          authority-prefix: ROLE_
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+  auth:
+    dev-token-enabled: ${DEV_TOKEN_ENABLED:false}
 
 management:
   endpoints:
