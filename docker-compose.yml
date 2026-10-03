@@ -17,6 +17,9 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/reservations
       SPRING_DATASOURCE_USERNAME: reservations
       SPRING_DATASOURCE_PASSWORD: reservations
+      # local-only placeholder; real deploys set JWT_SECRET from the platform secret store
+      JWT_SECRET: ${JWT_SECRET:-local-dev-only-not-a-secret-0123456789}
+      DEV_TOKEN_ENABLED: "true"
     mem_limit: 512m
     depends_on:
       db:
