@@ -62,3 +62,6 @@ deploy
 htmlReport
 
 docs
+# Local/prod config, never committed
+application-dev.yml
+application-prod.yml
