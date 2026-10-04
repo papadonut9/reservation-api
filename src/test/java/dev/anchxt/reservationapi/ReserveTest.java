@@ -10,6 +10,7 @@ import com.jayway.jsonpath.JsonPath;
 import dev.anchxt.reservationapi.exception.ApiExceptionHandler;
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -24,6 +25,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.transaction.support.TransactionTemplate;
 
 class ReserveTest extends IntegrationTest {
@@ -267,6 +269,91 @@ class ReserveTest extends IntegrationTest {
     }
     assertThat(seatStatus(id, "S1")).isEqualTo("AVAILABLE");
     assertThat(admission.availablePermits()).isEqualTo(permits);
+  }
+
+  static String body(ResultActions r) throws Exception {
+    return r.andReturn().getResponse().getContentAsString();
+  }
+
+  @Test
+  void retryReplaysOriginalAndMovesNothing() throws Exception {
+    long id = newShow(3);
+    var auth = user("retry");
+    var first = body(reserve(id, auth, "k1", "S2", "S1").andExpect(status().isCreated()));
+    var again = body(reserve(id, auth, "k1", "S1", "S2").andExpect(status().isCreated()));
+    assertThat(again).isEqualTo(first); // same seats in another order is the same request
+    assertThat(reservations(id)).isEqualTo(1);
+    assertThat(seatStatus(id, "S3")).isEqualTo("AVAILABLE");
+  }
+
+  @Test
+  void sameKeyDifferentRequestIs409() throws Exception {
+    long id = newShow(3);
+    long other = newShow(1);
+    var auth = user("changed");
+    reserve(id, auth, "k1", "S1").andExpect(status().isCreated());
+    reserve(id, auth, "k1", "S2")
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.reason").value("idempotency_conflict"));
+    reserve(other, auth, "k1", "S1")
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.reason").value("idempotency_conflict"));
+    assertThat(seatStatus(id, "S2")).isEqualTo("AVAILABLE");
+    assertThat(seatStatus(other, "S1")).isEqualTo("AVAILABLE");
+  }
+
+  @Test
+  void declinedKeyIsNotStored() throws Exception {
+    long id = newShow(2);
+    reserve(id, user("owner"), key(), "S1").andExpect(status().isCreated());
+    var auth = user("late");
+    reserve(id, auth, "k1", "S1").andExpect(status().isConflict());
+    // the decline rolled back, so k1 is free: a retry runs fresh, a new body is not a conflict
+    reserve(id, auth, "k1", "S1")
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.reason").value("seat_taken"));
+    reserve(id, auth, "k1", "S2").andExpect(status().isCreated());
+  }
+
+  @Test
+  void keysAreScopedPerUser() throws Exception {
+    long id = newShow(2);
+    reserve(id, user("a"), "shared", "S1").andExpect(status().isCreated());
+    reserve(id, user("b"), "shared", "S2").andExpect(status().isCreated());
+    assertThat(reservations(id)).isEqualTo(2);
+  }
+
+  @Test
+  void parallelSameKeyReservesOnce() throws Exception {
+    long id = newShow(2);
+    var auth = user("storm");
+    var gate = new CountDownLatch(1);
+    var results = new ArrayList<Future<MockHttpServletResponse>>();
+    try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (int i = 0; i < 50; i++) {
+        results.add(
+            pool.submit(
+                () -> {
+                  gate.await();
+                  return reserve(id, auth, "same", "S1").andReturn().getResponse();
+                }));
+      }
+      gate.countDown();
+      var ids = new HashSet<String>();
+      for (var f : results) {
+        var r = f.get(30, TimeUnit.SECONDS);
+        if (r.getStatus() == 201) {
+          ids.add(JsonPath.read(r.getContentAsString(), "$.reservation_id"));
+        } else {
+          // a waiter on the unique index can outlast lock_timeout on a slow runner
+          assertThat(r.getStatus()).isEqualTo(409);
+          assertThat((String) JsonPath.read(r.getContentAsString(), "$.reason")).isEqualTo("busy");
+        }
+      }
+      assertThat(ids).hasSize(1);
+    }
+    assertThat(reservations(id)).isEqualTo(1);
+    assertThat(seatStatus(id, "S2")).isEqualTo("AVAILABLE");
   }
 
   @Test
