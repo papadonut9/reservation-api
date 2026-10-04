@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.jayway.jsonpath.JsonPath;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -82,6 +83,19 @@ abstract class IntegrationTest {
             .getResponse()
             .getContentAsString();
     return ((Number) JsonPath.read(json, "$.id")).longValue();
+  }
+
+  ResultActions reserve(long show, String auth, String key, String... seats) throws Exception {
+    return mvc.perform(
+        post("/shows/" + show + "/reserve")
+            .header("Authorization", auth)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(
+                Arrays.stream(seats)
+                    .map(s -> "\"" + s + "\"")
+                    .collect(
+                        Collectors.joining(
+                            ",", "{\"seats\":[", "],\"idempotency_key\":\"" + key + "\"}"))));
   }
 
   String getShow(long id, String auth) throws Exception {

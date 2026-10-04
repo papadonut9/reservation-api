@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.jayway.jsonpath.JsonPath;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -91,33 +92,10 @@ class ReservationApiApplicationTests extends IntegrationTest {
     }
   }
 
-  /** Same claim reserve (IMS-32) will use; swap for HTTP reserve once it exists. */
-  boolean claim(long show, String seat) {
-    return new TransactionTemplate(txm)
-        .execute(
-            s -> {
-              var rid = UUID.randomUUID();
-              jdbc.sql(
-                      "INSERT INTO reservations (id, show_id, user_id, idempotency_key,"
-                          + " request_hash, amount_paise, status) VALUES (?, ?, 'u', ?, 'h', 100, 'CONFIRMED')")
-                  .params(rid, show, rid.toString())
-                  .update();
-              boolean won =
-                  jdbc.sql(
-                              "UPDATE seats SET status = 'CONFIRMED', reservation_id = ?"
-                                  + " WHERE show_id = ? AND seat_no = ? AND status = 'AVAILABLE'")
-                          .params(rid, show, seat)
-                          .update()
-                      == 1;
-              if (!won) s.setRollbackOnly();
-              return won;
-            });
-  }
-
   @Test
   void getShowGroupsSeatsByStatus() throws Exception {
     long id = newShow(3);
-    assertThat(claim(id, "S2")).isTrue();
+    reserve(id, token("{\"sub\":\"u1\"}"), "k", "S2").andExpect(status().isCreated());
     var json = getShow(id, token("{\"sub\":\"u1\"}"));
     assertThat((List<String>) JsonPath.read(json, "$.seats.available")).containsExactly("S1", "S3");
     assertThat((List<String>) JsonPath.read(json, "$.seats.held")).isEmpty();
@@ -129,14 +107,19 @@ class ReservationApiApplicationTests extends IntegrationTest {
   }
 
   @Test
-  void invariantHoldsDuringAndAfterConcurrentClaims() throws Exception {
+  void invariantHoldsDuringAndAfterConcurrentReserves() throws Exception {
     long id = newShow(200);
     var auth = token("{\"sub\":\"u1\"}");
+    // one user per reserve, so the per-user limit never turns a seat decline into a limit decline
+    var users = new ArrayList<String>();
+    for (int i = 0; i < 400; i++) {
+      users.add(token("{\"sub\":\"inv" + i + "\"}"));
+    }
     var wins = new AtomicInteger();
     var done = new AtomicBoolean();
     var pool = Executors.newFixedThreadPool(10);
     try {
-      // 2 readers poll GET while 8 writers claim: half the attempts on hot seat S1
+      // 2 readers poll GET while 8 writers reserve: half the attempts on hot seat S1
       var readers =
           IntStream.range(0, 2)
               .mapToObj(
@@ -157,9 +140,20 @@ class ReservationApiApplicationTests extends IntegrationTest {
                   i ->
                       pool.submit(
                           () -> {
-                            if (claim(id, i % 2 == 0 ? "S1" : "S" + (1 + i % 200))) {
+                            int st =
+                                reserve(
+                                        id,
+                                        users.get(i),
+                                        UUID.randomUUID().toString(),
+                                        i % 2 == 0 ? "S1" : "S" + (1 + i % 200))
+                                    .andReturn()
+                                    .getResponse()
+                                    .getStatus();
+                            assertThat(st).isIn(201, 409);
+                            if (st == 201) {
                               wins.incrementAndGet();
                             }
+                            return st;
                           }))
               .toList();
       for (var w : writers) w.get(30, TimeUnit.SECONDS);

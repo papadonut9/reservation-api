@@ -1,0 +1,289 @@
+package dev.anchxt.reservationapi;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.jayway.jsonpath.JsonPath;
+import dev.anchxt.reservationapi.exception.ApiExceptionHandler;
+import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class ReserveTest extends IntegrationTest {
+
+  @Autowired ApiExceptionHandler advice;
+  @Autowired DataSource dataSource;
+  @Autowired Semaphore admission;
+
+  String user(String sub) throws Exception {
+    return token("{\"sub\":\"" + sub + "\"}");
+  }
+
+  static String key() {
+    return UUID.randomUUID().toString();
+  }
+
+  String seatStatus(long show, String seat) {
+    return jdbc.sql("SELECT status FROM seats WHERE show_id = ? AND seat_no = ?")
+        .params(show, seat)
+        .query(String.class)
+        .single();
+  }
+
+  long reservations(long show) {
+    return jdbc.sql("SELECT count(*) FROM reservations WHERE show_id = ?")
+        .param(show)
+        .query(Long.class)
+        .single();
+  }
+
+  @Test
+  void hotSeatHasExactlyOneWinner() throws Exception {
+    long id = newShow(10);
+    int n = 500;
+    // tokens minted before the gate opens, so the storm is all reserves
+    var tokens = new ArrayList<String>();
+    for (int i = 0; i < n; i++) {
+      tokens.add(user("hot" + i));
+    }
+    var gate = new CountDownLatch(1);
+    var results = new ArrayList<Future<MockHttpServletResponse>>();
+    try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (var auth : tokens) {
+        results.add(
+            pool.submit(
+                () -> {
+                  gate.await();
+                  return reserve(id, auth, key(), "S1").andReturn().getResponse();
+                }));
+      }
+      gate.countDown();
+      int created = 0;
+      for (var f : results) {
+        var r = f.get(30, TimeUnit.SECONDS);
+        if (r.getStatus() == 201) {
+          created++;
+        } else {
+          assertThat(r.getStatus()).isEqualTo(409);
+          assertThat((String) JsonPath.read(r.getContentAsString(), "$.reason"))
+              .isEqualTo("seat_taken");
+        }
+      }
+      assertThat(created).isEqualTo(1);
+    }
+    assertThat(seatStatus(id, "S1")).isEqualTo("CONFIRMED");
+    assertThat(reservations(id)).isEqualTo(1); // every loser rolled back its reservation row
+  }
+
+  @Test
+  void bodyUserIdIsIgnored() throws Exception {
+    long id = newShow(2);
+    mvc.perform(
+            post("/shows/" + id + "/reserve")
+                .header("Authorization", user("real"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"seats\":[\"S1\"],\"idempotency_key\":\"k\",\"user_id\":\"victim\"}"))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.user_id").value("real"))
+        .andExpect(jsonPath("$.show_id").value(id))
+        .andExpect(jsonPath("$.seats[0]").value("S1"))
+        .andExpect(jsonPath("$.amount_paise").value(100))
+        .andExpect(jsonPath("$.status").value("confirmed"))
+        .andExpect(jsonPath("$.reservation_id").isString());
+    assertThat(
+            jdbc.sql("SELECT user_id FROM reservations WHERE show_id = ?")
+                .param(id)
+                .query(String.class)
+                .single())
+        .isEqualTo("real");
+  }
+
+  @Test
+  void partialRequestTakesNothing() throws Exception {
+    long id = newShow(3);
+    reserve(id, user("first"), key(), "S2").andExpect(status().isCreated());
+    reserve(id, user("second"), key(), "S1", "S2")
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.reason").value("seat_taken"));
+    assertThat(seatStatus(id, "S1")).isEqualTo("AVAILABLE");
+    assertThat(reservations(id)).isEqualTo(1);
+  }
+
+  @Test
+  void duplicateSeatIsChargedOnce() throws Exception {
+    long id = newShow(2);
+    reserve(id, user("dup"), key(), "S1", "S1")
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.seats.length()").value(1))
+        .andExpect(jsonPath("$.amount_paise").value(100));
+  }
+
+  @Test
+  void seatsComeBackSorted() throws Exception {
+    long id = newShow(3);
+    reserve(id, user("sort"), key(), "S3", "S1")
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.seats[0]").value("S1"))
+        .andExpect(jsonPath("$.seats[1]").value("S3"))
+        .andExpect(jsonPath("$.amount_paise").value(200));
+  }
+
+  @Test
+  void unknownSeatIs404AndTakesNothing() throws Exception {
+    long id = newShow(2);
+    reserve(id, user("unknown"), key(), "S1", "Z99").andExpect(status().isNotFound());
+    assertThat(seatStatus(id, "S1")).isEqualTo("AVAILABLE");
+    assertThat(reservations(id)).isZero();
+  }
+
+  @Test
+  void unknownShowIs404() throws Exception {
+    reserve(999_999, user("noshow"), key(), "S1").andExpect(status().isNotFound());
+  }
+
+  @Test
+  void invalidRequestIs400() throws Exception {
+    long id = newShow(1);
+    var auth = user("bad");
+    for (var body :
+        List.of(
+            "{\"seats\":[],\"idempotency_key\":\"k\"}",
+            "{\"seats\":[\"A 1\"],\"idempotency_key\":\"k\"}",
+            "{\"seats\":[\"S1\"]}",
+            "{\"seats\":[\"S1\"],\"idempotency_key\":\" \"}",
+            "{\"seats\":[\"S1\"],\"idempotency_key\":\"" + "k".repeat(129) + "\"}",
+            "{\"idempotency_key\":\"k\"}")) {
+      mvc.perform(
+              post("/shows/" + id + "/reserve")
+                  .header("Authorization", auth)
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content(body))
+          .andExpect(status().isBadRequest());
+    }
+    assertThat(reservations(id)).isZero();
+  }
+
+  @Test
+  void noTokenIs401() throws Exception {
+    mvc.perform(
+            post("/shows/1/reserve")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"seats\":[\"S1\"],\"idempotency_key\":\"k\"}"))
+        .andExpect(status().isUnauthorized());
+  }
+
+  @Test
+  void lockTimeoutIsBusy() throws Exception {
+    long id = newShow(1);
+    var locked = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    // an open transaction holds the same (user, key) unique entry; reserve waits on it
+    var holder =
+        Executors.newSingleThreadExecutor()
+            .submit(
+                () ->
+                    new TransactionTemplate(txm)
+                        .executeWithoutResult(
+                            s -> {
+                              jdbc.sql(
+                                      "INSERT INTO reservations (id, show_id, user_id,"
+                                          + " idempotency_key, request_hash, amount_paise, status)"
+                                          + " VALUES (?, ?, 'waiter', 'same', 'h', 100, 'CONFIRMED')")
+                                  .params(UUID.randomUUID(), id)
+                                  .update();
+                              locked.countDown();
+                              try {
+                                release.await(10, TimeUnit.SECONDS);
+                              } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                              }
+                              s.setRollbackOnly();
+                            }));
+    try {
+      assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+      reserve(id, user("waiter"), "same", "S1")
+          .andExpect(status().isConflict())
+          .andExpect(jsonPath("$.reason").value("busy"));
+    } finally {
+      release.countDown();
+      holder.get(10, TimeUnit.SECONDS);
+    }
+    assertThat(seatStatus(id, "S1")).isEqualTo("AVAILABLE");
+  }
+
+  @Test
+  void statementTimeoutIsBusy() {
+    // the real exception this Spring/Hibernate/PgJDBC stack throws for 57014, through the advice
+    RuntimeException e =
+        assertThrows(
+            RuntimeException.class,
+            () ->
+                new TransactionTemplate(txm)
+                    .executeWithoutResult(
+                        s -> {
+                          jdbc.sql("SET LOCAL statement_timeout = '1ms'").update();
+                          jdbc.sql("SELECT pg_sleep(1)").query().singleRow();
+                        }));
+    var response = advice.database(e);
+    assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+    assertThat(response.getBody()).isEqualTo(Map.of("reason", "busy"));
+  }
+
+  @Test
+  void poolExhaustionIs429() throws Exception {
+    long id = newShow(1);
+    var auth = user("starved");
+    int permits = admission.availablePermits();
+    var held = new ArrayList<Connection>();
+    try {
+      // the reserve gets a permit, then times out waiting on the pool
+      for (int i = 0; i < 15; i++) {
+        held.add(dataSource.getConnection());
+      }
+      reserve(id, auth, key(), "S1")
+          .andExpect(status().isTooManyRequests())
+          .andExpect(jsonPath("$.reason").value("overloaded"));
+    } finally {
+      for (var c : held) {
+        c.close();
+      }
+    }
+    assertThat(seatStatus(id, "S1")).isEqualTo("AVAILABLE");
+    assertThat(admission.availablePermits()).isEqualTo(permits);
+  }
+
+  @Test
+  void admissionTimeoutIs429AndLeaksNoPermit() throws Exception {
+    long id = newShow(1);
+    var auth = user("queued");
+    int permits = admission.availablePermits();
+    admission.acquire(permits); // drain: the reserve's own tryAcquire times out
+    try {
+      reserve(id, auth, key(), "S1")
+          .andExpect(status().isTooManyRequests())
+          .andExpect(jsonPath("$.reason").value("overloaded"));
+    } finally {
+      admission.release(permits);
+    }
+    // a release after the failed tryAcquire would show up here as permits + 1
+    assertThat(admission.availablePermits()).isEqualTo(permits);
+    assertThat(reservations(id)).isZero();
+  }
+}
