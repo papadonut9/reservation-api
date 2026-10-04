@@ -17,12 +17,16 @@ Jira: IMS board, epic IMS-27. Prefix commits with the task key (e.g. `IMS-32: at
 ### Git flow
 - master: bootstrap commit only (CLAUDE.md, README, .gitignore). pre-prod: cut from master.
 - Feature branches are cut from pre-prod (pull latest first): `IMS-32-atomic-seat-claim`. Never from another feature branch.
-- Flow: feature → pre-prod (merge commit) → master (batch promote, merge commit, never squash).
+- Linear history, no merge commits. Flow: feature → pre-prod (rebase on latest pre-prod, then GitHub "Rebase and merge"; never squash, per-ticket commits stay) → master (batch promote, fast-forward only: `git push origin pre-prod:master`). GitHub rebase-merge rewrites SHAs, so never use it for pre-prod → master.
 - Dependent ticket starts only after its predecessor is merged to pre-prod.
   Order: IMS-28→29→30→31→32→33→34→35→36→37→38→39→40→41→42→43.
   IMS-44 (stretch) only after core is deployed.
 - `mvn verify` green before merge to pre-prod.
 - Deploy from master only. Promote pre-prod → master before IMS-42 (deploy), with approval.
+
+### Package layout
+- Package by layer under `dev.anchxt.reservationapi`: `controller` (HTTP only), `dto` (request/response records), `service` (transactions, orchestration), `repository` (all SQL), `model` (domain types/enums), `exception` (domain exceptions + advice), `config`.
+- No SQL outside `repository`. No HTTP types (ResponseStatusException, Jwt) below `controller`.
 
 ### Disclosure
 - Append to `AI_USAGE.md` per ticket: what was directed vs decided.
