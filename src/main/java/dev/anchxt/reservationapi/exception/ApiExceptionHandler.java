@@ -33,6 +33,11 @@ public class ApiExceptionHandler {
     return reason(HttpStatus.CONFLICT, e.getMessage());
   }
 
+  @ExceptionHandler(OverloadedException.class)
+  ResponseEntity<Map<String, String>> overloaded(OverloadedException e) {
+    return reason(HttpStatus.TOO_MANY_REQUESTS, e.getMessage());
+  }
+
   @ExceptionHandler({DataAccessException.class, TransactionException.class})
   public ResponseEntity<Map<String, String>> database(RuntimeException e) {
     for (Throwable t = e; t != null; t = t.getCause()) {
