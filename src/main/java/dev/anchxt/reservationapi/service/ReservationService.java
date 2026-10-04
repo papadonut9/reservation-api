@@ -19,8 +19,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Reserve: all-or-nothing over the requested seats, in one transaction. Lock order is reservation
- * row, then quota row, then seats; the seat lock comes last so whoever takes it has nothing left
- * that can fail. Any decline throws, which rolls the whole transaction back, quota included.
+ * row, then seats; the seat lock comes last so whoever takes it has nothing left that can fail. Any
+ * decline throws, which rolls the whole transaction back.
  */
 @Service
 public class ReservationService {
@@ -71,9 +71,6 @@ public class ReservationService {
               var amount = repo.insertIfAbsent(id, showId, userId, key, requestHash, seats.size());
               if (amount.isEmpty()) {
                 return replay(userId, key, requestHash);
-              }
-              if (!repo.claimQuota(userId, showId, seats.size())) {
-                throw new ConflictException("per_user_limit");
               }
               var locked = repo.lockSeats(showId, seats);
               if (locked.size() != seats.size()) {

@@ -67,30 +67,6 @@ public class ReservationRepository {
   }
 
   /**
-   * Adds {@code seats} to the user's held count for the show; false if that would pass the limit.
-   * One atomic upsert, never count-then-check: same-user requests serialize on the quota row, and
-   * the WHERE is re-checked against the latest committed count. The insert path is guarded too
-   * ({@code seats <= per_user_limit}), and ck_quota_bounds backs both up. max_held is copied from
-   * the show on first insert. The caller has already checked that the show exists.
-   */
-  public boolean claimQuota(String userId, long showId, int seats) {
-    return jdbc.sql(
-            "INSERT INTO user_show_quota (user_id, show_id, held, max_held)"
-                + " SELECT :user, s.id, :seats, s.per_user_limit FROM shows s"
-                + " WHERE s.id = :show AND :seats <= s.per_user_limit"
-                + " ON CONFLICT (user_id, show_id) DO UPDATE"
-                + " SET held = user_show_quota.held + :seats"
-                + " WHERE user_show_quota.held + :seats <= user_show_quota.max_held"
-                + " RETURNING held")
-        .param("user", userId)
-        .param("show", showId)
-        .param("seats", seats)
-        .query(Integer.class)
-        .optional()
-        .isPresent();
-  }
-
-  /**
    * Row-locks the requested seats in seat_no order and returns their statuses. NOWAIT: a seat
    * locked by another transaction is a decline, never a wait, so no wait-for cycle (deadlock) can
    * form across seats. Unknown seats are simply absent from the result.
