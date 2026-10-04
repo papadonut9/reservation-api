@@ -1,8 +1,7 @@
-package dev.anchxt.reservationapi.auth;
+package dev.anchxt.reservationapi.controller;
 
+import dev.anchxt.reservationapi.dto.TokenRequest;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
@@ -29,11 +28,6 @@ class DevTokenController {
   DevTokenController(JwtEncoder encoder) {
     this.encoder = encoder;
   }
-
-  // sub capped at 128 to match the user_id CHECKs in schema.sql
-  record TokenRequest(
-      @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,128}") String sub,
-      @Pattern(regexp = "USER|ADMIN") String role) {}
 
   @PostMapping("/auth/token")
   Map<String, String> token(@Valid @RequestBody TokenRequest req) {

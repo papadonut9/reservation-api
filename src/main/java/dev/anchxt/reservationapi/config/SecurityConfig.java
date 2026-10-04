@@ -1,4 +1,4 @@
-package dev.anchxt.reservationapi.auth;
+package dev.anchxt.reservationapi.config;
 
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
 import java.nio.charset.StandardCharsets;
