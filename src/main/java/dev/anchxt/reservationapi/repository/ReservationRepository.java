@@ -31,16 +31,38 @@ public class ReservationRepository {
         .singleRow();
   }
 
-  /** Inserts the reservation priced from the show row; returns the amount, empty if no show. */
-  public Optional<Long> insert(
+  /** A stored reservation, as needed to replay it. */
+  public record Existing(UUID id, long showId, String requestHash, long amountPaise) {}
+
+  /**
+   * Inserts the reservation priced from the show row; returns the amount. Empty if the show does
+   * not exist or (user, key) is already taken. A same-key insert still in flight elsewhere makes
+   * this wait on the unique index until that transaction ends: commit means empty here, rollback
+   * means this insert goes through.
+   */
+  public Optional<Long> insertIfAbsent(
       UUID id, long showId, String userId, String key, String requestHash, int seats) {
     return jdbc.sql(
             "INSERT INTO reservations"
                 + " (id, show_id, user_id, idempotency_key, request_hash, amount_paise, status)"
                 + " SELECT ?, id, ?, ?, ?, price_paise * ?, 'CONFIRMED' FROM shows WHERE id = ?"
+                + " ON CONFLICT (user_id, idempotency_key) DO NOTHING"
                 + " RETURNING amount_paise")
         .params(id, userId, key, requestHash, seats, showId)
         .query(Long.class)
+        .optional();
+  }
+
+  /** Read committed: a new statement, so it sees the row that made insertIfAbsent a no-op. */
+  public Optional<Existing> findByKey(String userId, String key) {
+    return jdbc.sql(
+            "SELECT id, show_id, request_hash, amount_paise FROM reservations"
+                + " WHERE user_id = ? AND idempotency_key = ?")
+        .params(userId, key)
+        .query(
+            (rs, n) ->
+                new Existing(
+                    rs.getObject(1, UUID.class), rs.getLong(2), rs.getString(3), rs.getLong(4)))
         .optional();
   }
 
