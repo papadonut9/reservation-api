@@ -22,3 +22,11 @@
 - AI decided: kept column name `seat_no` (matches CLAUDE.md SQL), type `TEXT COLLATE "C"` so DB byte order/equality matches Java sort and dedupe; labels limited to `[A-Za-z0-9-]{1,99}` in both the request and the DB CHECK; edited V1 in place since it was never committed or merged.
 - Directed: log rejected (401/403) requests too. AI decided: wrap the default bearer entry point and access-denied handler in `SecurityConfig` with a WARN line (method, path, reason or `sub`; never the token), since those requests stop in the filter chain before any controller; tests pin `spring.flyway.enabled=true` so a local gitignored `application-dev.yml` cannot switch migrations off.
 - Open for human: per-show `per_user_limit` is not in the request, schema default 4 applies.
+
+## IMS-37 GET /shows/{id}
+- Directed by human: ticket order changed (IMS-37 before reserve tickets); GET /shows/{id} is public (no token); asked how reads behave against rows locked by in-flight claims; no direct commits.
+- Suggested by AI, rejected by human: flat `seats: [{seat_no, status}]` list.
+- Suggested by human: seats grouped by status (`seats.available/held/confirmed` lists) to cut payload size (status not repeated per seat) and avoid a filter pass in UI/QA. AI implemented it.
+- Suggested by AI, approved by human: endpoint in existing `ShowController`; one `REPEATABLE READ` read-only tx reads the show row and all seats, counts are list sizes (same snapshot as a `GROUP BY`, one fewer query); plain MVCC reads, no `FOR UPDATE`/`FOR SHARE`, so GET never waits on or blocks seat locks and an uncommitted claim reads as available; `SET LOCAL statement_timeout = '1s'`; all three status keys always present.
+- Suggested by AI, approved by human (tests): reserve endpoint does not exist yet, so the concurrent invariant test runs the CLAUDE.md conditional `UPDATE` claim directly (400 attempts, half on one hot seat) while GET is polled; a second test holds `FOR UPDATE` on a seat and asserts GET answers in under 1s. Swap to HTTP reserve once IMS-32 lands.
+- Open for human: pool-timeout on GET under burst is not mapped yet (no `@RestControllerAdvice`); belongs to the errors ticket.

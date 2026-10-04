@@ -6,7 +6,15 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.jayway.jsonpath.JsonPath;
+import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
@@ -24,6 +32,8 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 @SpringBootTest(
@@ -49,6 +59,7 @@ class ReservationApiApplicationTests {
 
   @Autowired MockMvc mvc;
   @Autowired JdbcClient jdbc;
+  @Autowired PlatformTransactionManager txm;
 
   String token(String body) throws Exception {
     var json =
@@ -130,6 +141,162 @@ class ReservationApiApplicationTests {
             "{\"name\":\"x\",\"price_paise\":100,\"seats\":[\"" + "A".repeat(100) + "\"]}",
             "{\"name\":\"\",\"price_paise\":100,\"seats\":[\"A1\"]}")) {
       createShow(body).andExpect(status().isBadRequest());
+    }
+  }
+
+  long newShow(int seats) throws Exception {
+    var json =
+        createShow(
+                "{\"name\":\"s\",\"price_paise\":100,\"seats\":"
+                    + IntStream.rangeClosed(1, seats)
+                        .mapToObj(i -> "\"S" + i + "\"")
+                        .collect(Collectors.joining(",", "[", "]"))
+                    + "}")
+            .andExpect(status().isCreated())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    return ((Number) JsonPath.read(json, "$.id")).longValue();
+  }
+
+  String getShow(long id, String auth) throws Exception {
+    return mvc.perform(get("/shows/" + id).header("Authorization", auth))
+        .andExpect(status().isOk())
+        .andReturn()
+        .getResponse()
+        .getContentAsString();
+  }
+
+  /** Same claim reserve (IMS-32) will use; swap for HTTP reserve once it exists. */
+  boolean claim(long show, String seat) {
+    return new TransactionTemplate(txm)
+        .execute(
+            s -> {
+              var rid = UUID.randomUUID();
+              jdbc.sql(
+                      "INSERT INTO reservations (id, show_id, user_id, idempotency_key,"
+                          + " request_hash, amount_paise, status) VALUES (?, ?, 'u', ?, 'h', 100, 'CONFIRMED')")
+                  .params(rid, show, rid.toString())
+                  .update();
+              boolean won =
+                  jdbc.sql(
+                              "UPDATE seats SET status = 'CONFIRMED', reservation_id = ?"
+                                  + " WHERE show_id = ? AND seat_no = ? AND status = 'AVAILABLE'")
+                          .params(rid, show, seat)
+                          .update()
+                      == 1;
+              if (!won) s.setRollbackOnly();
+              return won;
+            });
+  }
+
+  /** available + held + confirmed == total_seats, lists match counts, no seat in two lists. */
+  static int assertInvariant(String json) {
+    int total = JsonPath.read(json, "$.total_seats");
+    int sum = 0;
+    var all = new HashSet<String>();
+    for (var st : List.of("available", "held", "confirmed")) {
+      List<String> seats = JsonPath.read(json, "$.seats." + st);
+      int count = JsonPath.read(json, "$.counts." + st);
+      assertThat(seats).hasSize(count);
+      all.addAll(seats);
+      sum += count;
+    }
+    assertThat(sum).isEqualTo(total);
+    assertThat(all).hasSize(total);
+    return JsonPath.read(json, "$.counts.confirmed");
+  }
+
+  @Test
+  void getShowGroupsSeatsByStatus() throws Exception {
+    long id = newShow(3);
+    assertThat(claim(id, "S2")).isTrue();
+    var json = getShow(id, token("{\"sub\":\"u1\"}"));
+    assertThat((List<String>) JsonPath.read(json, "$.seats.available")).containsExactly("S1", "S3");
+    assertThat((List<String>) JsonPath.read(json, "$.seats.held")).isEmpty();
+    assertThat((List<String>) JsonPath.read(json, "$.seats.confirmed")).containsExactly("S2");
+    assertThat(assertInvariant(json)).isEqualTo(1);
+
+    mvc.perform(get("/shows/" + id)).andExpect(status().isOk());
+    mvc.perform(get("/shows/999999")).andExpect(status().isNotFound());
+  }
+
+  @Test
+  void invariantHoldsDuringAndAfterConcurrentClaims() throws Exception {
+    long id = newShow(200);
+    var auth = token("{\"sub\":\"u1\"}");
+    var wins = new AtomicInteger();
+    var done = new AtomicBoolean();
+    var pool = Executors.newFixedThreadPool(10);
+    try {
+      // 2 readers poll GET while 8 writers claim: half the attempts on hot seat S1
+      var readers =
+          IntStream.range(0, 2)
+              .mapToObj(
+                  r ->
+                      pool.submit(
+                          () -> {
+                            int reads = 0;
+                            while (!done.get() || reads == 0) {
+                              assertInvariant(getShow(id, auth));
+                              reads++;
+                            }
+                            return reads;
+                          }))
+              .toList();
+      var writers =
+          IntStream.range(0, 400)
+              .mapToObj(
+                  i ->
+                      pool.submit(
+                          () -> {
+                            if (claim(id, i % 2 == 0 ? "S1" : "S" + (1 + i % 200))) {
+                              wins.incrementAndGet();
+                            }
+                          }))
+              .toList();
+      for (var w : writers) w.get(30, TimeUnit.SECONDS);
+      done.set(true);
+      for (var r : readers) assertThat(r.get(30, TimeUnit.SECONDS)).isPositive();
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(assertInvariant(getShow(id, auth))).isEqualTo(wins.get());
+  }
+
+  @Test
+  void getDoesNotWaitOnSeatLock() throws Exception {
+    long id = newShow(2);
+    var locked = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var holder =
+        Executors.newSingleThreadExecutor()
+            .submit(
+                () ->
+                    new TransactionTemplate(txm)
+                        .executeWithoutResult(
+                            s -> {
+                              jdbc.sql(
+                                      "SELECT 1 FROM seats WHERE show_id = ? AND seat_no = 'S1' FOR UPDATE")
+                                  .param(id)
+                                  .query()
+                                  .listOfRows();
+                              locked.countDown();
+                              try {
+                                release.await(10, TimeUnit.SECONDS);
+                              } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                              }
+                            }));
+    try {
+      assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+      long start = System.nanoTime();
+      var json = getShow(id, token("{\"sub\":\"u1\"}"));
+      assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(1));
+      assertThat((List<String>) JsonPath.read(json, "$.seats.available")).contains("S1");
+    } finally {
+      release.countDown();
+      holder.get(10, TimeUnit.SECONDS);
     }
   }
 
