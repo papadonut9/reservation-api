@@ -79,7 +79,7 @@ Sell assigned seats; never double-sell; survive an on-sale stampede; be observab
 
 ## 8. Observability
 - Actuator liveness (no DB) + readiness (includes `db`, fails closed 503). Platform check points at liveness.
-- Counters: `reservations_confirmed_total`, `reservations_declined_total{reason=seat_taken|per_user_limit|idempotent_replay|idempotency_conflict}`.
+- Counters: `reservations_confirmed_total`, `reservations_declined_total{reason=seat_taken|per_user_limit|idempotent_replay|idempotency_conflict|busy}`.
 - Gauge `seats{show_id,status}` read from the DB on a schedule, not in-memory increments.
 - Increment counters after commit / in the exception advice, never inside the transaction.
 - Tags: never user_id, seat_no, request id.

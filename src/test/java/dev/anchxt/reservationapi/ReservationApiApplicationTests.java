@@ -7,7 +7,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.jayway.jsonpath.JsonPath;
 import java.time.Duration;
-import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -19,57 +19,13 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
-@SpringBootTest(
-    properties = {
-      "app.jwt.secret=test-secret-at-least-32-bytes-long-0123456789",
-      "app.auth.dev-token-enabled=true",
-      // local, gitignored application-dev.yml may turn Flyway off; tests always migrate
-      "spring.flyway.enabled=true"
-    })
-@AutoConfigureMockMvc
-@Import(ReservationApiApplicationTests.Db.class)
 @ExtendWith(OutputCaptureExtension.class)
-class ReservationApiApplicationTests {
-
-  @TestConfiguration(proxyBeanMethods = false)
-  static class Db {
-    @Bean
-    @ServiceConnection
-    PostgreSQLContainer postgres() {
-      return new PostgreSQLContainer("postgres:16-alpine");
-    }
-  }
-
-  @Autowired MockMvc mvc;
-  @Autowired JdbcClient jdbc;
-  @Autowired PlatformTransactionManager txm;
-
-  String token(String body) throws Exception {
-    var json =
-        mvc.perform(post("/auth/token").contentType(MediaType.APPLICATION_JSON).content(body))
-            .andExpect(status().isOk())
-            .andReturn()
-            .getResponse()
-            .getContentAsString();
-    return "Bearer " + JsonPath.read(json, "$.token");
-  }
+class ReservationApiApplicationTests extends IntegrationTest {
 
   @Test
   void healthIsPublic() throws Exception {
@@ -95,14 +51,6 @@ class ReservationApiApplicationTests {
     mvc.perform(post("/shows").header("Authorization", token("{\"sub\":\"u1\"}")))
         .andExpect(status().isForbidden());
     assertThat(out).contains("403 POST /shows sub=u1");
-  }
-
-  ResultActions createShow(String body) throws Exception {
-    return mvc.perform(
-        post("/shows")
-            .header("Authorization", token("{\"sub\":\"a1\",\"role\":\"ADMIN\"}"))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(body));
   }
 
   @Test
@@ -144,73 +92,10 @@ class ReservationApiApplicationTests {
     }
   }
 
-  long newShow(int seats) throws Exception {
-    var json =
-        createShow(
-                "{\"name\":\"s\",\"price_paise\":100,\"seats\":"
-                    + IntStream.rangeClosed(1, seats)
-                        .mapToObj(i -> "\"S" + i + "\"")
-                        .collect(Collectors.joining(",", "[", "]"))
-                    + "}")
-            .andExpect(status().isCreated())
-            .andReturn()
-            .getResponse()
-            .getContentAsString();
-    return ((Number) JsonPath.read(json, "$.id")).longValue();
-  }
-
-  String getShow(long id, String auth) throws Exception {
-    return mvc.perform(get("/shows/" + id).header("Authorization", auth))
-        .andExpect(status().isOk())
-        .andReturn()
-        .getResponse()
-        .getContentAsString();
-  }
-
-  /** Same claim reserve (IMS-32) will use; swap for HTTP reserve once it exists. */
-  boolean claim(long show, String seat) {
-    return new TransactionTemplate(txm)
-        .execute(
-            s -> {
-              var rid = UUID.randomUUID();
-              jdbc.sql(
-                      "INSERT INTO reservations (id, show_id, user_id, idempotency_key,"
-                          + " request_hash, amount_paise, status) VALUES (?, ?, 'u', ?, 'h', 100, 'CONFIRMED')")
-                  .params(rid, show, rid.toString())
-                  .update();
-              boolean won =
-                  jdbc.sql(
-                              "UPDATE seats SET status = 'CONFIRMED', reservation_id = ?"
-                                  + " WHERE show_id = ? AND seat_no = ? AND status = 'AVAILABLE'")
-                          .params(rid, show, seat)
-                          .update()
-                      == 1;
-              if (!won) s.setRollbackOnly();
-              return won;
-            });
-  }
-
-  /** available + held + confirmed == total_seats, lists match counts, no seat in two lists. */
-  static int assertInvariant(String json) {
-    int total = JsonPath.read(json, "$.total_seats");
-    int sum = 0;
-    var all = new HashSet<String>();
-    for (var st : List.of("available", "held", "confirmed")) {
-      List<String> seats = JsonPath.read(json, "$.seats." + st);
-      int count = JsonPath.read(json, "$.counts." + st);
-      assertThat(seats).hasSize(count);
-      all.addAll(seats);
-      sum += count;
-    }
-    assertThat(sum).isEqualTo(total);
-    assertThat(all).hasSize(total);
-    return JsonPath.read(json, "$.counts.confirmed");
-  }
-
   @Test
   void getShowGroupsSeatsByStatus() throws Exception {
     long id = newShow(3);
-    assertThat(claim(id, "S2")).isTrue();
+    reserve(id, token("{\"sub\":\"u1\"}"), "k", "S2").andExpect(status().isCreated());
     var json = getShow(id, token("{\"sub\":\"u1\"}"));
     assertThat((List<String>) JsonPath.read(json, "$.seats.available")).containsExactly("S1", "S3");
     assertThat((List<String>) JsonPath.read(json, "$.seats.held")).isEmpty();
@@ -222,14 +107,19 @@ class ReservationApiApplicationTests {
   }
 
   @Test
-  void invariantHoldsDuringAndAfterConcurrentClaims() throws Exception {
+  void invariantHoldsDuringAndAfterConcurrentReserves() throws Exception {
     long id = newShow(200);
     var auth = token("{\"sub\":\"u1\"}");
+    // one user per reserve, so the per-user limit never turns a seat decline into a limit decline
+    var users = new ArrayList<String>();
+    for (int i = 0; i < 400; i++) {
+      users.add(token("{\"sub\":\"inv" + i + "\"}"));
+    }
     var wins = new AtomicInteger();
     var done = new AtomicBoolean();
     var pool = Executors.newFixedThreadPool(10);
     try {
-      // 2 readers poll GET while 8 writers claim: half the attempts on hot seat S1
+      // 2 readers poll GET while 8 writers reserve: half the attempts on hot seat S1
       var readers =
           IntStream.range(0, 2)
               .mapToObj(
@@ -250,9 +140,20 @@ class ReservationApiApplicationTests {
                   i ->
                       pool.submit(
                           () -> {
-                            if (claim(id, i % 2 == 0 ? "S1" : "S" + (1 + i % 200))) {
+                            int st =
+                                reserve(
+                                        id,
+                                        users.get(i),
+                                        UUID.randomUUID().toString(),
+                                        i % 2 == 0 ? "S1" : "S" + (1 + i % 200))
+                                    .andReturn()
+                                    .getResponse()
+                                    .getStatus();
+                            assertThat(st).isIn(201, 409);
+                            if (st == 201) {
                               wins.incrementAndGet();
                             }
+                            return st;
                           }))
               .toList();
       for (var w : writers) w.get(30, TimeUnit.SECONDS);
