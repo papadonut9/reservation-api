@@ -13,6 +13,8 @@ spring:
       connection-timeout: 2000
   jpa:
     open-in-view: false
+    hibernate:
+      ddl-auto: validate
   security:
     oauth2:
       resourceserver:
