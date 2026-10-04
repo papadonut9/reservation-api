@@ -56,7 +56,8 @@ public class SecurityConfig {
               "403 {} {} sub={}",
               req.getMethod(),
               req.getRequestURI(),
-              Objects.requireNonNull(SecurityContextHolder.getContext().getAuthentication()).getName());
+              Objects.requireNonNull(SecurityContextHolder.getContext().getAuthentication())
+                  .getName());
           bearer403.handle(req, res, ex);
         };
     return http.csrf(AbstractHttpConfigurer::disable)
@@ -65,6 +66,8 @@ public class SecurityConfig {
             a ->
                 a.requestMatchers(
                         "/actuator/health/**", "/actuator/prometheus", "/auth/token", "/error")
+                    .permitAll()
+                    .requestMatchers(HttpMethod.GET, "/shows/*")
                     .permitAll()
                     .requestMatchers(HttpMethod.POST, "/shows")
                     .hasRole("ADMIN")
