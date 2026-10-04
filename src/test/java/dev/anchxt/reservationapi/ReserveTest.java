@@ -10,6 +10,7 @@ import com.jayway.jsonpath.JsonPath;
 import dev.anchxt.reservationapi.exception.ApiExceptionHandler;
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -479,5 +480,66 @@ class ReserveTest extends IntegrationTest {
     }
     assertThat(held("burst", id)).isEqualTo(confirmedSeats("burst", id));
     assertInvariant(getShow(id, auth));
+  }
+
+  @Test
+  void overlappingMultiSeatRequestsAreAllOrNothing() throws Exception {
+    long id = newShow(6);
+    int n = 300;
+    // each request wants two neighbours on a ring of 6 seats, every other one in reverse order:
+    // [S1,S2] vs [S2,S3] vs ... vs [S6,S1], the overlap an unordered lock would deadlock on
+    var requests = new ArrayList<String[]>();
+    var tokens = new ArrayList<String>();
+    for (int i = 0; i < n; i++) {
+      var a = "S" + (1 + i % 6);
+      var b = "S" + (1 + (i + 1) % 6);
+      requests.add(i % 2 == 0 ? new String[] {a, b} : new String[] {b, a});
+      tokens.add(user("ring" + i));
+    }
+    var gate = new CountDownLatch(1);
+    var results = new ArrayList<Future<MockHttpServletResponse>>();
+    try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+      for (int i = 0; i < n; i++) {
+        var auth = tokens.get(i);
+        var seats = requests.get(i);
+        results.add(
+            pool.submit(
+                () -> {
+                  gate.await();
+                  return reserve(id, auth, key(), seats).andReturn().getResponse();
+                }));
+      }
+      gate.countDown();
+      var owner = new HashMap<String, String>(); // seat -> reservation_id of the 201 holding it
+      for (var f : results) {
+        var r = f.get(30, TimeUnit.SECONDS);
+        var json = r.getContentAsString();
+        if (r.getStatus() == 201) {
+          List<String> seats = JsonPath.read(json, "$.seats");
+          assertThat(seats).hasSize(2); // a success always holds the whole request
+          for (var seat : seats) {
+            assertThat(owner.put(seat, JsonPath.read(json, "$.reservation_id"))).isNull();
+          }
+        } else {
+          // distinct users and keys never wait, so no busy: a deadlock would show up here
+          assertThat(r.getStatus()).isEqualTo(409);
+          assertThat((String) JsonPath.read(json, "$.reason")).isEqualTo("seat_taken");
+        }
+      }
+      assertThat(owner).isNotEmpty();
+      // the DB agrees with the 201s seat for seat, and every loser left nothing behind
+      var confirmed = new HashMap<String, String>();
+      jdbc.sql(
+              "SELECT seat_no, reservation_id::text FROM seats"
+                  + " WHERE show_id = ? AND status = 'CONFIRMED'")
+          .param(id)
+          .query(
+              rs -> {
+                confirmed.put(rs.getString(1), rs.getString(2));
+              });
+      assertThat(confirmed).isEqualTo(owner);
+      assertThat(reservations(id)).isEqualTo(owner.size() / 2);
+    }
+    assertInvariant(getShow(id, tokens.get(0)));
   }
 }
