@@ -7,7 +7,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.jayway.jsonpath.JsonPath;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -19,57 +18,13 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
-@SpringBootTest(
-    properties = {
-      "app.jwt.secret=test-secret-at-least-32-bytes-long-0123456789",
-      "app.auth.dev-token-enabled=true",
-      // local, gitignored application-dev.yml may turn Flyway off; tests always migrate
-      "spring.flyway.enabled=true"
-    })
-@AutoConfigureMockMvc
-@Import(ReservationApiApplicationTests.Db.class)
 @ExtendWith(OutputCaptureExtension.class)
-class ReservationApiApplicationTests {
-
-  @TestConfiguration(proxyBeanMethods = false)
-  static class Db {
-    @Bean
-    @ServiceConnection
-    PostgreSQLContainer postgres() {
-      return new PostgreSQLContainer("postgres:16-alpine");
-    }
-  }
-
-  @Autowired MockMvc mvc;
-  @Autowired JdbcClient jdbc;
-  @Autowired PlatformTransactionManager txm;
-
-  String token(String body) throws Exception {
-    var json =
-        mvc.perform(post("/auth/token").contentType(MediaType.APPLICATION_JSON).content(body))
-            .andExpect(status().isOk())
-            .andReturn()
-            .getResponse()
-            .getContentAsString();
-    return "Bearer " + JsonPath.read(json, "$.token");
-  }
+class ReservationApiApplicationTests extends IntegrationTest {
 
   @Test
   void healthIsPublic() throws Exception {
@@ -95,14 +50,6 @@ class ReservationApiApplicationTests {
     mvc.perform(post("/shows").header("Authorization", token("{\"sub\":\"u1\"}")))
         .andExpect(status().isForbidden());
     assertThat(out).contains("403 POST /shows sub=u1");
-  }
-
-  ResultActions createShow(String body) throws Exception {
-    return mvc.perform(
-        post("/shows")
-            .header("Authorization", token("{\"sub\":\"a1\",\"role\":\"ADMIN\"}"))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(body));
   }
 
   @Test
@@ -144,29 +91,6 @@ class ReservationApiApplicationTests {
     }
   }
 
-  long newShow(int seats) throws Exception {
-    var json =
-        createShow(
-                "{\"name\":\"s\",\"price_paise\":100,\"seats\":"
-                    + IntStream.rangeClosed(1, seats)
-                        .mapToObj(i -> "\"S" + i + "\"")
-                        .collect(Collectors.joining(",", "[", "]"))
-                    + "}")
-            .andExpect(status().isCreated())
-            .andReturn()
-            .getResponse()
-            .getContentAsString();
-    return ((Number) JsonPath.read(json, "$.id")).longValue();
-  }
-
-  String getShow(long id, String auth) throws Exception {
-    return mvc.perform(get("/shows/" + id).header("Authorization", auth))
-        .andExpect(status().isOk())
-        .andReturn()
-        .getResponse()
-        .getContentAsString();
-  }
-
   /** Same claim reserve (IMS-32) will use; swap for HTTP reserve once it exists. */
   boolean claim(long show, String seat) {
     return new TransactionTemplate(txm)
@@ -188,23 +112,6 @@ class ReservationApiApplicationTests {
               if (!won) s.setRollbackOnly();
               return won;
             });
-  }
-
-  /** available + held + confirmed == total_seats, lists match counts, no seat in two lists. */
-  static int assertInvariant(String json) {
-    int total = JsonPath.read(json, "$.total_seats");
-    int sum = 0;
-    var all = new HashSet<String>();
-    for (var st : List.of("available", "held", "confirmed")) {
-      List<String> seats = JsonPath.read(json, "$.seats." + st);
-      int count = JsonPath.read(json, "$.counts." + st);
-      assertThat(seats).hasSize(count);
-      all.addAll(seats);
-      sum += count;
-    }
-    assertThat(sum).isEqualTo(total);
-    assertThat(all).hasSize(total);
-    return JsonPath.read(json, "$.counts.confirmed");
   }
 
   @Test
