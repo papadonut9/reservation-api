@@ -64,24 +64,37 @@ public class ReservationService {
   private ReservationView claim(
       long showId, String userId, List<String> seats, String requestHash, String key) {
     var id = UUID.randomUUID();
-    long amount =
-        Objects.requireNonNull(
-            tx.execute(
-                s -> {
-                  repo.setTimeouts();
-                  long a =
-                      repo.insert(id, showId, userId, key, requestHash, seats.size())
-                          .orElseThrow(NotFoundException::new);
-                  var locked = repo.lockSeats(showId, seats);
-                  if (locked.size() != seats.size()) {
-                    throw new NotFoundException();
-                  }
-                  if (locked.stream().anyMatch(st -> st != SeatStatus.AVAILABLE)) {
-                    throw new ConflictException("seat_taken");
-                  }
-                  repo.confirmSeats(id, showId, seats);
-                  return a;
-                }));
-    return new ReservationView(id, showId, userId, seats, amount, "confirmed");
+    return Objects.requireNonNull(
+        tx.execute(
+            s -> {
+              repo.setTimeouts();
+              var amount = repo.insertIfAbsent(id, showId, userId, key, requestHash, seats.size());
+              if (amount.isEmpty()) {
+                return replay(userId, key, requestHash);
+              }
+              var locked = repo.lockSeats(showId, seats);
+              if (locked.size() != seats.size()) {
+                throw new NotFoundException();
+              }
+              if (locked.stream().anyMatch(st -> st != SeatStatus.AVAILABLE)) {
+                throw new ConflictException("seat_taken");
+              }
+              repo.confirmSeats(id, showId, seats);
+              return new ReservationView(id, showId, userId, seats, amount.get(), "confirmed");
+            }));
+  }
+
+  /**
+   * The key is taken (or the show is missing): same request → the original 201 body, rebuilt from
+   * the stored hash so it survives a later cancel; different request → 409. Nothing is written.
+   */
+  private ReservationView replay(String userId, String key, String requestHash) {
+    var r = repo.findByKey(userId, key).orElseThrow(NotFoundException::new);
+    if (!r.requestHash().equals(requestHash)) {
+      throw new ConflictException("idempotency_conflict");
+    }
+    // hash is "showId:A1,A2"; seat labels never contain ':' or ','
+    var seats = List.of(r.requestHash().substring(r.requestHash().indexOf(':') + 1).split(","));
+    return new ReservationView(r.id(), r.showId(), userId, seats, r.amountPaise(), "confirmed");
   }
 }
