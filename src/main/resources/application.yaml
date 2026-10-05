@@ -28,7 +28,8 @@ app:
   auth:
     dev-token-enabled: ${DEV_TOKEN_ENABLED:false}
   reserve:
-    admission-wait: 2s
+    # ceiling, not added latency: ~ client in-flight cap / measured tx/s (WRITEUP "Admission")
+    admission-wait: 15s
 
 management:
   endpoints:
