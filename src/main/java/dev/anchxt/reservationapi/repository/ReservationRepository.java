@@ -7,10 +7,14 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
-/** Reserve-path SQL. Callers run these in one transaction, in this file's order. */
+/**
+ * Reserve and cancel SQL. Callers run each flow in one transaction, in this file's order: both take
+ * the reservation row, then the quota row, then seats.
+ */
 @Repository
 public class ReservationRepository {
 
@@ -31,8 +35,20 @@ public class ReservationRepository {
         .singleRow();
   }
 
-  /** A stored reservation, as needed to replay it. */
-  public record Existing(UUID id, long showId, String requestHash, long amountPaise) {}
+  /** A stored reservation, as needed to replay or cancel it. */
+  public record Existing(
+      UUID id, long showId, String requestHash, long amountPaise, String status) {}
+
+  private static final String EXISTING_COLUMNS = "id, show_id, request_hash, amount_paise, status";
+
+  private static final RowMapper<Existing> EXISTING =
+      (rs, n) ->
+          new Existing(
+              rs.getObject(1, UUID.class),
+              rs.getLong(2),
+              rs.getString(3),
+              rs.getLong(4),
+              rs.getString(5));
 
   /**
    * Inserts the reservation priced from the show row; returns the amount. Empty if the show does
@@ -56,13 +72,12 @@ public class ReservationRepository {
   /** Read committed: a new statement, so it sees the row that made insertIfAbsent a no-op. */
   public Optional<Existing> findByKey(String userId, String key) {
     return jdbc.sql(
-            "SELECT id, show_id, request_hash, amount_paise FROM reservations"
+            "SELECT "
+                + EXISTING_COLUMNS
+                + " FROM reservations"
                 + " WHERE user_id = ? AND idempotency_key = ?")
         .params(userId, key)
-        .query(
-            (rs, n) ->
-                new Existing(
-                    rs.getObject(1, UUID.class), rs.getLong(2), rs.getString(3), rs.getLong(4)))
+        .query(EXISTING)
         .optional();
   }
 
@@ -117,6 +132,41 @@ public class ReservationRepository {
             "UPDATE seats SET status = 'CONFIRMED', reservation_id = ?"
                 + " WHERE show_id = ? AND seat_no = ANY(?::text[])")
         .params(reservationId, showId, seatNos.toArray(String[]::new))
+        .update();
+  }
+
+  public Optional<Existing> markCancelled(UUID id, String userId) {
+    return jdbc.sql(
+            "UPDATE reservations SET status = 'CANCELLED'"
+                + " WHERE id = ? AND user_id = ? AND status = 'CONFIRMED'"
+                + " RETURNING "
+                + EXISTING_COLUMNS)
+        .params(id, userId)
+        .query(EXISTING)
+        .optional();
+  }
+
+  /** Only picks the response for a cancel that changed nothing; never decides a write. */
+  public boolean isOwner(UUID id, String userId) {
+    return jdbc.sql("SELECT EXISTS (SELECT 1 FROM reservations WHERE id = ? AND user_id = ?)")
+        .params(id, userId)
+        .query(Boolean.class)
+        .single();
+  }
+
+  /** Cancel step 2. ck_quota_bounds rejects going below zero. */
+  public void releaseQuota(String userId, long showId, int seats) {
+    jdbc.sql("UPDATE user_show_quota SET held = held - ? WHERE user_id = ? AND show_id = ?")
+        .params(seats, userId, showId)
+        .update();
+  }
+
+  /** Cancel step 3: by owner id, so a seat since confirmed to someone else is never touched. */
+  public void releaseSeats(UUID reservationId) {
+    jdbc.sql(
+            "UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL"
+                + " WHERE reservation_id = ?")
+        .params(reservationId)
         .update();
   }
 }

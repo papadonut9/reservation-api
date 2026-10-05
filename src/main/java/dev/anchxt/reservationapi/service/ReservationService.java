@@ -8,6 +8,7 @@ import dev.anchxt.reservationapi.model.SeatStatus;
 import dev.anchxt.reservationapi.repository.ReservationRepository;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.TreeSet;
 import java.util.UUID;
@@ -88,16 +89,48 @@ public class ReservationService {
   }
 
   /**
-   * The key is taken (or the show is missing): same request → the original 201 body, rebuilt from
-   * the stored hash so it survives a later cancel; different request → 409. Nothing is written.
+   * The key is taken (or the show is missing): same request → the stored reservation, seats rebuilt
+   * from the hash (a cancel frees them) and its current status; different request → 409. Nothing is
+   * written.
    */
   private ReservationView replay(String userId, String key, String requestHash) {
     var r = repo.findByKey(userId, key).orElseThrow(NotFoundException::new);
     if (!r.requestHash().equals(requestHash)) {
       throw new ConflictException("idempotency_conflict");
     }
-    // hash is "showId:A1,A2"; seat labels never contain ':' or ','
-    var seats = List.of(r.requestHash().substring(r.requestHash().indexOf(':') + 1).split(","));
-    return new ReservationView(r.id(), r.showId(), userId, seats, r.amountPaise(), "confirmed");
+    return new ReservationView(
+        r.id(),
+        r.showId(),
+        userId,
+        seatsOf(r.requestHash()),
+        r.amountPaise(),
+        r.status().toLowerCase(Locale.ROOT));
+  }
+
+  /**
+   * Same lock order as reserve: reservation row, quota row, seats. The guarded UPDATE on the
+   * reservation row decides, so a repeat cancel changes nothing. Unknown and someone else's are
+   * both 404, so existence never leaks. No admission permit: cancels are not the burst, and pool
+   * exhaustion is already a 429.
+   */
+  public void cancel(UUID id, String userId) {
+    tx.executeWithoutResult(
+        s -> {
+          repo.setTimeouts();
+          var r = repo.markCancelled(id, userId);
+          if (r.isEmpty()) {
+            if (!repo.isOwner(id, userId)) {
+              throw new NotFoundException();
+            }
+            return; // already cancelled
+          }
+          repo.releaseQuota(userId, r.get().showId(), seatsOf(r.get().requestHash()).size());
+          repo.releaseSeats(id);
+        });
+  }
+
+  /** request_hash is "showId:A1,A2"; seat labels never contain ':' or ','. */
+  private static List<String> seatsOf(String requestHash) {
+    return List.of(requestHash.substring(requestHash.indexOf(':') + 1).split(","));
   }
 }
