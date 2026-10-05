@@ -29,8 +29,9 @@ curl -s -XPOST localhost:8080/shows/1/reserve -H "Authorization: Bearer $TOKEN" 
 - **All-or-nothing.** Every requested seat is confirmed, or none is. If one seat is taken the whole
   request is declined and the free seats stay free. Duplicates are dropped; seats come back sorted.
 - **Idempotency.** `idempotency_key` is scoped per user. The same key with the same show and seats
-  (any order) returns the original 201 and moves nothing; with a different show or seats it is 409.
-  Declined requests are not stored, so retrying a declined key runs fresh.
+  (any order) returns the stored reservation with 201 and moves nothing; with a different show or
+  seats it is 409. Declined requests are not stored, so retrying a declined key runs fresh. After a
+  cancel the same key replays with `"status":"cancelled"`; booking again needs a new key.
 - **Per-user limit.** A user holds at most `per_user_limit` seats per show (default 4), counted in seats.
 
 | Status | `reason` | When |
@@ -45,6 +46,28 @@ curl -s -XPOST localhost:8080/shows/1/reserve -H "Authorization: Bearer $TOKEN" 
 | 409 | `busy` | Lock or statement timeout; safe to retry with the same key |
 | 409 | `conflict` | Any other constraint violation |
 | 429 | `overloaded` | Too many reserves in flight; retry with the same key |
+| 503 | `unavailable` | Database unreachable |
+
+## Cancel
+`POST /reservations/{id}/cancel` (owner only, acts as the token's `sub`)
+
+```
+curl -s -XPOST localhost:8080/reservations/$RID/cancel -H "Authorization: Bearer $TOKEN"
+# 204
+```
+
+Frees the reservation's seats and gives them back to the user's per-show limit, in one transaction.
+The seats are immediately re-bookable. Release is explicit; holds do not expire (reserve confirms
+immediately, see WRITEUP).
+
+| Status | `reason` | When |
+|---|---|---|
+| 204 | | Cancelled, or already cancelled by its owner (repeat is a no-op) |
+| 400 | | `id` is not a UUID |
+| 401 | | Missing or invalid token |
+| 404 | | Unknown id, or someone else's reservation (existence is not revealed) |
+| 409 | `busy` | Lock or statement timeout; safe to retry |
+| 429 | `overloaded` | Connection pool exhausted; retry |
 | 503 | `unavailable` | Database unreachable |
 
 Design and trade-offs: [WRITEUP.md](WRITEUP.md).

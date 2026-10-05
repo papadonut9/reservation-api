@@ -41,10 +41,12 @@ owns both its seats, no seat is owned twice, and the database matches the 201s s
 - **Seats never wait.** `NOWAIT` turns "locked by someone else" into an immediate decline. A
   transaction that never waits on a seat cannot be part of a wait-for cycle through seats, whatever
   order seats are requested in.
-- **Fixed order across tables:** reservation key → quota row → seats, everywhere (cancel, IMS-36, must take them in the same order).
-  The only waits left are on a same-user, same-key insert in flight (unique index) and on the same
-  user's quota row. A transaction that holds the quota row only goes on to `NOWAIT` seat locks, so it
-  never waits while holding it, and no cycle can close.
+- **Fixed order across tables:** reservation row → quota row → seats, in reserve and cancel alike.
+  On the reserve side the only waits left are on a same-user, same-key insert in flight (unique index)
+  and on the same user's quota row. A reserve that holds the quota row only goes on to `NOWAIT` seat
+  locks, so it never waits while holding it. A cancel can wait on its own seats (a reserve's `NOWAIT`
+  probe holds them briefly), but that reserve never waits on anything the cancel holds, so no cycle
+  can close.
 - **Sorted anyway.** Seats are locked in `ORDER BY seat_no` order, which makes outcomes deterministic.
   `seat_no` is `TEXT COLLATE "C"` (byte order), and Java's `String` order (UTF-16 code units) is the
   same order for the allowed labels `[A-Za-z0-9-]`, so the Java sort and the SQL lock order agree.
@@ -54,12 +56,38 @@ owns both its seats, no seat is owned twice, and the database matches the 201s s
 ## Idempotency
 
 `UNIQUE (user_id, idempotency_key)` plus `request_hash`, the readable string `"showId:A1,A2"` (sorted,
-deduplicated). Same key + same hash → the original 201 body, rebuilt from the stored row and hash
-(so it survives a later cancel freeing the seats). Same key + different hash → 409
+deduplicated). Same key + same hash → 201 with the stored reservation: seats rebuilt from the hash
+(they survive a cancel freeing them), status as it is now, so a replay after a cancel says
+`cancelled` rather than claiming a booking that no longer exists. Same key + different hash → 409
 `idempotency_conflict`. A second request with a key still in flight waits on the unique index: if the
 first commits it replays, if the first rolls back its own insert goes through. Only successes are
 stored; a declined key can be retried fresh. The replay returns before the quota and seat steps, so a
 retry moves nothing.
+
+## Release: explicit cancel, no expiring holds
+
+The spec allows either an owner-only cancel or a time-boxed hold that expires. Reserve already
+returns `confirmed`, so there is no hold to expire; explicit cancel needs no `HELD` state, no clock
+and no sweeper job. A lazy expiry (treat an old `HELD` row as free at claim time, no sweeper) was
+rejected: the expired holder's quota row is never decremented, so they stay locked out of their own
+limit, and the `seats{status}` gauge counts dead holds as held. Expiry is the stretch ticket
+(IMS-44); its sweeper would be this same transaction with a different `WHERE`.
+
+One transaction, same lock order as reserve:
+
+1. `UPDATE reservations SET status = 'CANCELLED' WHERE id = ? AND user_id = ? AND status = 'CONFIRMED' RETURNING ...`
+   This is the decision. A concurrent cancel of the same id waits on the row lock, re-checks the
+   `WHERE` after the first commits, and matches nothing.
+2. `UPDATE user_show_quota SET held = held - n`, `n` from the stored `request_hash`.
+3. `UPDATE seats SET status = 'AVAILABLE', reservation_id = NULL WHERE reservation_id = ?`.
+
+**Never resurrecting someone else's seat.** Step 3 matches by owner id, never by seat label, so a seat
+since confirmed to another reservation carries a different `reservation_id` and is not touched. A
+repeat cancel stops at step 1 before it reaches the quota or the seats.
+
+**No match in step 1** is answered by a read that only chooses the status code: the caller's own,
+already-cancelled reservation → 204 (repeat is a no-op); unknown or someone else's → 404 for both,
+so an id's existence is not revealed.
 
 ## Errors: zero 5xx on domain outcomes
 
