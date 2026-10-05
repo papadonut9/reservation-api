@@ -34,7 +34,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
     properties = {
       "app.jwt.secret=test-secret-at-least-32-bytes-long-0123456789",
       "app.auth.dev-token-enabled=true",
-      "spring.flyway.enabled=true"
+      "spring.flyway.enabled=true",
+      // the drained-semaphore test waits out the full ceiling
+      "app.reserve.admission-wait=2s"
     })
 @AutoConfigureMockMvc
 @Import(IntegrationTest.Db.class)
