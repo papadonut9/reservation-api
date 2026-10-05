@@ -137,12 +137,12 @@ queue ahead of it, and a waiting request holds no database connection.
 | Stress | 2000 | shows the ceiling has a 2× margin, not just a pass |
 | Hot-seat storm | 500 | correctness (one 201, the rest 409), not capacity |
 
-### Where it ran: Fly.io first, then a dedicated VM
+### Where it ran: Fly.io, then a dedicated VM, then Docker on Proxmox (the deploy)
 
 The sizing above is a formula; the burst script (IMS-41) is what tested it. Every run fires 20,000
 reserves at a fresh show, with the client on a separate machine from the app, and `CONCURRENCY` (N)
 stepped up between runs to find where each environment stops holding. Three environments were
-tried, in this order, and each one's result decided the next.
+tried, in this order, and each one's result decided the next. The third is the deploy.
 
 **1. Fly.io: two machines, one shared vCPU and 768MB each.** The first target was the planned
 deploy: the Docker image from this repo, which starts the JVM with `-XX:MaxRAMPercentage=75`, so
@@ -161,10 +161,9 @@ What limits this tier, as far as the runs and the config show:
   round trip, so each transaction holds its connection, and its admission permit, longer than it
   would against a local Postgres. Fewer transactions finish per second for the same pool.
 - **The formula was already past its ceiling at 8,000.** 8,000 / 335 ≈ 24s, longer than the 15s
-  admission wait. That 8,000 still held suggests that Fly's proxy, like the reverse proxy in
-  environment 3, was shaping the load before it reached the semaphore. `fly.toml` sets no
-  `[http_service.concurrency]`, so Fly's default per-machine limits applied. IMS-42 sets them
-  explicitly.
+  admission wait. That 8,000 still held suggests that Fly's proxy, like Cloudflare in
+  environment 3, was shaping the load before it reached the semaphore. No
+  `[http_service.concurrency]` was set, so Fly's default per-machine limits applied.
 - **Memory grows with N, not with tx/s.** See below. 768MB leaves little room for thousands of
   requests to sit waiting.
 
@@ -176,12 +175,13 @@ capped its heap at its default 25% of RAM, about 256MB. It held to about **N = 1
 The same 20,000 requests that had capped Fly at 8,000 got almost twice as far on one dedicated
 vCPU. That points at Fly's shared CPU and network database as the earlier limit, not at the code.
 
-**3. The same VM with 2GB RAM, heap at 75%.** The memory was doubled, and the jar was started
-with `-XX:MaxRAMPercentage=75`, the same flag the Dockerfile uses. The 1GB run had used the JVM's
-default sizing, which caps the heap at 25% of RAM. So the heap went from about 256MB to about
-1.5GB, roughly six times larger, while the OS kept about 512MB. Nothing else changed: same VM, same
-single vCPU, same proxy, same jar. The out-of-memory failure went away and throughput jumped
-visibly. All four runs below passed every check:
+**3. Docker on Proxmox: the repo's image, 2 CPUs, ~1GB heap. This is the deploy.** The VM had
+shown the code holds on a dedicated CPU, but a bare `java -jar` is not how a clean checkout runs.
+So the VM was retired and the app moved into a container on a Proxmox Docker host: the image this
+repo's `Dockerfile` builds, unchanged, the same one `docker compose up` builds. The image starts the
+JVM with `-XX:MaxRAMPercentage=75`, which gives a ~1GB heap here (from `jvm_memory_max_bytes`).
+Postgres runs on a dedicated node, and Cloudflare sits in front for TLS. All four runs below passed
+every check:
 
 | In-flight N | Time | tx/s | Transport retries | 429 | `busy` |
 |---|---|---|---|---|---|
@@ -194,36 +194,32 @@ Reading the table:
 - **N = 5,000 confirms the formula.** 5,000 / 611 ≈ 8s, under the 15s ceiling, and indeed nothing
   timed out: 0 × 429, 0 × `busy`, with only 18 connections dropped in front of the app.
 - **From N = 10,000 up, the zero 429s need care.** The formula predicts waits past 15s
-  (19,000 / 365 ≈ 52s), yet nothing timed out. The reverse proxy in front of the VM dropped
-  thousands of connections before they reached the app (the retry column). Tomcat accepts at most
-  8,192 connections by default, so beyond that the excess waits in the proxy or the kernel's accept
-  queue, and some of it is cut off. The client retried each dropped request with the same
-  idempotency key, so those requests reached the app spread out over time and the semaphore queue
-  never got near N. At that scale the proxy, not the semaphore, was limiting concurrency.
+  (19,000 / 365 ≈ 52s), yet nothing timed out. Cloudflare dropped thousands of connections before
+  they reached the app (the retry column). Tomcat accepts at most 8,192 connections by default, so
+  beyond that the excess waits in the proxy or the kernel's accept queue, and some of it is cut
+  off. The client retried each dropped request with the same idempotency key, so those requests
+  reached the app spread out over time and the semaphore queue never got near N. At that scale the
+  proxy, not the semaphore, was limiting concurrency.
 - **What these runs do prove is correctness under heavy retries.** The 19,000 run carried 7,772
   same-key retries. Not one seat was sold twice, every replay counted as `idempotent_replay` and
   never as a new booking, and Prometheus matched the client's counts to the unit. They do not prove
   the app can hold 19,000 requests queued at once.
 - **Throughput falls as N rises** (611 → 365 tx/s): every dropped connection costs a new TLS
-  handshake and another attempt on the same single vCPU.
+  handshake and another attempt on the same CPUs.
 
-**Why the extra gigabyte mattered.** The admission semaphore bounds how many transactions use
-the database at once (pool − 2). It does not bound how many requests the app holds in memory. A
-request waiting for a permit holds no database connection, but it still holds its socket, Tomcat's
-buffers, the parsed request body, the decoded JWT and a virtual thread parked on the semaphore.
-Thousands of waiting requests add up to hundreds of megabytes that the heap must hold at once, so
-memory grows with N, not with tx/s. The only cap on that number is Tomcat's 8,192-connection
-limit. As the heap fills, the JVM spends a growing share of its one vCPU on garbage collection
-before it finally fails.
+**Why memory mattered.** The admission semaphore bounds how many transactions use the database at
+once (pool − 2). It does not bound how many requests the app holds in memory. A request waiting for
+a permit holds no database connection, but it still holds its socket, Tomcat's buffers, the parsed
+request body, the decoded JWT and a virtual thread parked on the semaphore. Thousands of waiting
+requests add up to hundreds of megabytes that the heap must hold at once, so memory grows with N,
+not with tx/s. The only cap on that number is Tomcat's 8,192-connection limit. As the heap fills,
+the JVM spends a growing share of its CPU on garbage collection before it finally fails.
 
-Two changes compounded between the 1GB and 2GB runs. A plain `java -jar` with no flag caps the heap
-at 25% of the machine's RAM, so on the 1GB VM the app had only ~256MB of heap while ~750MB went
-unused by the JVM. That is the main reason it ran out of memory around 15,000 in flight. On the 2GB
-VM the heap was set to 75% (`-XX:MaxRAMPercentage=75`, matching the Dockerfile), about 1.5GB:
-six times the heap from twice the RAM. The flag mattered as much as the gigabyte. The extra
-headroom removed the out-of-memory failure, and it gave CPU back from GC to requests, which is
-where the throughput gain came from. The Fly machines already ran with the 75% flag, through the
-image, but 75% of 768MB is only ~576MB.
+That is what stopped the 1GB VM: a plain `java -jar` with no flag caps the heap at 25% of RAM, so
+the app had ~256MB of heap while ~750MB went unused. The deploy has about four times that heap and
+a second CPU. Both changed at once, so the runs cannot say how much of the gain each one gave; the
+out-of-memory failure is gone either way. The Fly machines already ran with the 75% flag, through
+the image, but 75% of 768MB is only ~576MB.
 
 **The lesson for any deploy: start the JVM with `-XX:MaxRAMPercentage=75`.** The Docker image
 already does, so this only bites when the jar runs directly. Without it, three quarters of the
@@ -231,11 +227,11 @@ machine's memory sits idle while the heap runs out.
 
 **The three environments side by side:**
 
-| Environment | CPU | RAM | Heap | Held up to | tx/s at that N | What stopped it |
-|---|---|---|---|---|---|---|
-| Fly.io, 2 machines (Docker image) | 1 shared vCPU each | 768MB each | ~576MB (75%) | N ≈ 8,000 | ~335 | could not hold N = 10,000 (~320 tx/s) |
-| Proxmox VM, `java -jar`, no flag | 1 dedicated vCPU | 1GB | ~256MB (default 25%) | N ≈ 15,000 | — | out of memory |
-| Proxmox VM, `java -jar -XX:MaxRAMPercentage=75` | 1 dedicated vCPU | 2GB | ~1.5GB (75%) | N = 19,000 (all PASS) | 365-611 | not reached; proxy drops grow with N |
+| Environment | CPU | Heap | Held up to | tx/s at that N | What stopped it |
+|---|---|---|---|---|---|
+| Fly.io, 2 machines (Docker image), 768MB each | 1 shared vCPU each | ~576MB (75%) | N ≈ 8,000 | ~335 | could not hold N = 10,000 (~320 tx/s) |
+| Proxmox VM, `java -jar`, no flag, 1GB | 1 dedicated vCPU | ~256MB (default 25%) | N ≈ 15,000 | — | out of memory |
+| **Docker on Proxmox (the deploy)** | 2 CPUs | ~1GB (75%) | N = 19,000 (all PASS) | 365-611 | not reached; proxy drops grow with N |
 
 **Load generator first.** A first run from a Windows client at N = 20,000 against Docker on the
 same machine got ~83 tx/s, 4,611 × 429 and 11,630 client socket errors (`No buffer space
@@ -243,16 +239,41 @@ available`). Client and server were fighting over the same CPU and one machine r
 sockets, so that run measured the load generator, not the server. It is why every run above uses
 a separate client.
 
-**What this means for the deploy.** Correctness never depended on capacity: across all four 2GB
-runs, every check passed. What capacity decides is whether a grader's burst sees 409s or 429s.
-On Fly's shared tier the ceiling was about 8,000 in flight. Past that, hot-seat losers can get 429
-instead of 409, which breaks the bar (the hot-seat 429 fix is a separate ticket). The levers, in
-order of effect seen here: a dedicated rather than shared CPU, a heap sized to the machine
-(`-XX:MaxRAMPercentage=75`) with enough memory behind it for requests waiting in the queue, and
-explicit proxy concurrency limits so the platform sheds load predictably.
-IMS-42 reruns the same burst against whatever is finally deployed and re-checks the 15s ceiling
-against that tx/s. If 429s still appear, raise the wait. An in-process "already confirmed" cache
-is ruled out: no caches on the reserve path, single instance only, and cancel would have to evict.
+### The deploy
+
+Correctness never depended on capacity: across all four runs on the deploy, every check passed.
+What capacity decides is whether a grader's burst sees 409s or 429s. On Fly's shared tier the
+ceiling was about 8,000 in flight; past that, hot-seat losers can get 429 instead of 409, which
+breaks the bar. Fly was also dropped because its free machines stop when idle, so a grader's first
+burst would land on a cold JVM. An in-process "already confirmed" cache is ruled out: no caches on
+the reserve path, single instance only, and cancel would have to evict.
+
+The headline run against the live URL (`CONCURRENCY=19000 ./burst.sh https://files.anchxt.dev`,
+run `muv0nuyq`, 20,000 requests in 54.7s, `RESULT: PASS`):
+
+| Group | Sent | 201 | Replay | `seat_taken` | `per_user_limit` | `idempotency_conflict` | 429 | 5xx |
+|---|---|---|---|---|---|---|---|---|
+| Hot seats A10-A14 | 2,500 | 3 | 0 | 2,497 | 0 | 0 | 0 | 0 |
+| Broad | 17,470 | 579 | 0 | 16,891 | 0 | 0 | 0 | 0 |
+| Same key ×20 | 20 | 1 | 19 | 0 | 0 | 0 | 0 | 0 |
+| One user, 10 parallel, limit 4 | 10 | 4 | 0 | 0 | 6 | 0 | 0 | 0 |
+| Post-burst checks | 3 | 2 | 0 | 0 | 0 | 1 | 0 | 0 |
+
+Every hot seat passed "exactly one 201, every other storm request 409". Only 3 of those 201s came
+from the storm group, because broad traffic also books row A and won the other two hot seats first.
+The invariant held in every poll during the burst and after it. The `seats` gauge matched
+`GET /shows/{id}` (34 available, 0 held, 996 confirmed), and every Prometheus counter delta matched
+the client's count.
+
+How the live setup differs from a clean `docker compose up`:
+
+| | `docker compose up` (clean clone) | Live (https://files.anchxt.dev) |
+|---|---|---|
+| Image | this repo's `Dockerfile` | same |
+| JVM | `-XX:MaxRAMPercentage=75`, 512MB container | same flag; 2 CPUs, ~1GB heap |
+| Postgres | `postgres:16-alpine` in the same compose stack | a dedicated Postgres node |
+| Profile | default (Flyway migrates on start) | `prod`, DB settings from env |
+| In front | nothing | Cloudflare (TLS) |
 
 ## Known gaps
 
@@ -265,7 +286,7 @@ is ruled out: no caches on the reserve path, single instance only, and cancel wo
 - **Memory is not bounded by admission.** The semaphore caps database work, not requests held in
   memory: each request waiting for a permit still holds a socket, buffers, the parsed body and a
   parked virtual thread, capped only by Tomcat's 8,192 connections. A 1GB VM with the JVM's default
-  25% heap (~256MB) ran out of memory around 15,000 in flight; 2GB with a 75% heap did not. The fix, if it is ever needed: lower `server.tomcat.max-connections`
+  25% heap (~256MB) ran out of memory around 15,000 in flight; the deploy's ~1GB heap (75%) did not. The fix, if it is ever needed: lower `server.tomcat.max-connections`
   to what the heap can hold, so the excess waits in the proxy rather than in the JVM, or make
   admission reject earlier once the queue passes a depth.
 - **`max_held` is copied** from `per_user_limit` at a user's first claim for a show; a later change to
