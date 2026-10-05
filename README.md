@@ -91,3 +91,14 @@ Public, no token:
 Reconcile after a burst (counters reset on restart, so compare deltas over the run; wait 5s for the
 gauge): confirmed delta = fresh 201s; declined deltas = 409/429s by `reason` plus replayed 201s;
 `seats{status="confirmed"}` = the `confirmed` count from `GET /shows/{id}`.
+
+### Logs
+One JSON object per line (ECS) on stdout. Every line carries `requestId`: the inbound `X-Request-Id`
+if it matches `[A-Za-z0-9-]{8,64}`, otherwise a generated UUID. The id is echoed in the
+`X-Request-Id` response header, including on 401/403. One access line per request
+(`POST /shows/1/reserve 409 3ms`); decline reasons are in the counters, not the logs.
+
+```
+curl -si -XPOST localhost:8080/shows/1/reserve -H 'X-Request-Id: burst-0001' ... | grep X-Request-Id
+docker compose logs app | grep '"requestId":"burst-0001"'
+```

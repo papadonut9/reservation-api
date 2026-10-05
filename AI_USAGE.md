@@ -79,3 +79,12 @@
 - Caught while building: Boot test contexts swap in a simple registry, so `/actuator/prometheus` was 404 in tests until `@AutoConfigureMetrics`; `http_server_requests_seconds` only appears after a completed request.
 - Human decided: `/actuator/metrics` dropped from exposure (it was 401 behind auth, and Prometheus covers it).
 - Open for human: readiness → 503 with Postgres stopped is a manual check (stopping the shared Testcontainer would break other tests); WRITEUP "2am alerts" belongs to the burst/deploy tickets.
+
+## IMS-40 structured logs (includes IMS-45 correlation id)
+- Directed by human: brainstorm IMS-40 and IMS-45 together; scope trimmed to the grader email (structured logs + correlation id + public logs or a recording); IMS-45 folded into IMS-40, one branch, after IMS-39.
+- Suggested by AI, approved by human: one `OncePerRequestFilter` at highest precedence (before Spring Security, so 401/403 carry an id) that sets the MDC, echoes the header and writes one access line in `finally`, instead of outcome log lines in the controller and the advice; decline reasons live in the IMS-39 counters.
+- AI decided: keep the `[A-Za-z0-9-]{8,64}` check on the inbound id (trust boundary: no log injection, bounded size) even though JSON escaping covers newlines; `ecs` in base `application.yaml` because compose runs the dev profile; header set before the chain since the response can commit inside it.
+- Cut by agreement: `requestId` in error bodies (the header covers it, and Security's 401/403 have no body); header tests only on 401 and 201 (one filter for every route).
+- History note: the `ecs` line reached pre-prod inside the unprefixed commit "add configurable credentials from env variables" (with a Fly launch commit and a merge commit), not in its own IMS-40 commit. Human chose to leave published history as is rather than force-push.
+- Known gap: an exception that escapes to the container's `/error` dispatch logs after the MDC is cleared, so that one error line has no `requestId` (true 500s only; domain paths never reach it).
+- Open for human: the "live logs under load" recording needs the IMS-41 burst script; logs and metrics viewed in Fly's hosted Grafana (`[metrics]` in `fly.toml`, IMS-42).
