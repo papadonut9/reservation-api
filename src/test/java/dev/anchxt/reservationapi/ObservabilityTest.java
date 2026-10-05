@@ -5,7 +5,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.jayway.jsonpath.JsonPath;
+import dev.anchxt.reservationapi.service.SeatGauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import org.junit.jupiter.api.Test;
@@ -15,6 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 class ObservabilityTest extends IntegrationTest {
 
   @Autowired MeterRegistry meters;
+  @Autowired SeatGauge seatGauge;
 
   @Test
   void livenessIgnoresTheDatabase() throws Exception {
@@ -77,6 +81,26 @@ class ObservabilityTest extends IntegrationTest {
             "reservations_declined_total{reason=\"idempotent_replay\"}",
             "hikaricp_connections_active",
             "http_server_requests_seconds");
+  }
+
+  /** The gauge reports what GET /shows reports, zeros included. */
+  @Test
+  void seatGaugeMatchesTheShow() throws Exception {
+    long show = newShow(3);
+    reserve(show, user("obs-g"), key(), "S1").andExpect(status().isCreated());
+    seatGauge.refresh();
+    var json = getShow(show, user("obs-g"));
+    for (var st : List.of("available", "held", "confirmed")) {
+      int count = JsonPath.read(json, "$.counts." + st);
+      assertThat(
+              meters
+                  .get("seats")
+                  .tags("show_id", Long.toString(show), "status", st)
+                  .gauge()
+                  .value())
+          .as(st)
+          .isEqualTo(count);
+    }
   }
 
   private Map<String, Double> outcomes() {

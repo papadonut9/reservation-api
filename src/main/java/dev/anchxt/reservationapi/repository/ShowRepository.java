@@ -45,6 +45,22 @@ public class ShowRepository {
         .list();
   }
 
+  public record SeatCount(long showId, String status, long count) {}
+
+  /**
+   * Seat count per show and status, zeros included (a sold-out show still reports available=0).
+   * Plain read, no locks; one scan of seats.
+   */
+  public List<SeatCount> countSeats() {
+    return jdbc.sql(
+            "SELECT s.id, st.status, count(seat.seat_no) FROM shows s"
+                + " CROSS JOIN (VALUES ('AVAILABLE'), ('HELD'), ('CONFIRMED')) st(status)"
+                + " LEFT JOIN seats seat ON seat.show_id = s.id AND seat.status = st.status"
+                + " GROUP BY s.id, st.status")
+        .query((rs, n) -> new SeatCount(rs.getLong(1), rs.getString(2), rs.getLong(3)))
+        .list();
+  }
+
   /** Inserts the show and every seat AVAILABLE; returns the generated id. */
   public long insert(Show show, List<String> seatNos) {
     long id =
