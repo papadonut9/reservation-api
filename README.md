@@ -71,3 +71,23 @@ immediately, see WRITEUP).
 | 503 | `unavailable` | Database unreachable |
 
 Design and trade-offs: [WRITEUP.md](WRITEUP.md).
+
+## Observe
+Public, no token:
+
+| Path | What |
+|---|---|
+| `/actuator/health/liveness` | Process only, never checks the DB (a DB outage must not restart the app). Point the platform check here. |
+| `/actuator/health/readiness` | Includes `db`; DB unreachable → `DOWN`, 503 within the 2s pool timeout |
+| `/actuator/prometheus` | Prometheus text format |
+
+| Metric | Meaning |
+|---|---|
+| `reservations_confirmed_total` | New reservations committed (one per reservation, not per seat) |
+| `reservations_declined_total{reason}` | Reserve declines: `seat_taken`, `per_user_limit`, `idempotent_replay`, `idempotency_conflict`, `busy`, `overloaded`. A replay returns 201 but counts here, never as confirmed |
+| `seats{show_id,status}` | Seats per show and status, read from the DB every 5s (up to 5s stale) |
+| `hikaricp_*`, `http_server_requests_seconds` | Pool and HTTP latency/status |
+
+Reconcile after a burst (counters reset on restart, so compare deltas over the run; wait 5s for the
+gauge): confirmed delta = fresh 201s; declined deltas = 409/429s by `reason` plus replayed 201s;
+`seats{status="confirmed"}` = the `confirmed` count from `GET /shows/{id}`.
