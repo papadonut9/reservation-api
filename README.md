@@ -1,11 +1,34 @@
 # Seat Reservation Service
 
+**Live:** https://files.anchxt.dev. Health is at `/actuator/health/liveness` and
+`/actuator/health/readiness`, metrics at `/actuator/prometheus`.
+
+## Run
+```
+docker compose up --build            # app on :8080, Postgres 16 alongside; Flyway migrates on start
+./burst.sh http://localhost:8080     # one-command stampede, see Burst below
+```
+
+## Deploy
+Live runs the image this repo's `Dockerfile` builds, the same one `docker compose up` builds, as a
+container on a Proxmox Docker host behind Cloudflare. Postgres runs on a separate dedicated node.
+The container's env:
+
+| Var | |
+|---|---|
+| `CONFIG_PROFILE` | `prod` |
+| `DB_HOST` (`host:port`), `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD` | the Postgres node |
+| `JWT_SECRET` | >= 32 bytes |
+| `DEV_TOKEN_ENABLED` | `true`, so graders can mint tokens (see Auth) |
+
+Flyway migrates on start in every profile, so a fresh database needs nothing applied by hand.
+
 ## Auth
 HS256 JWT. `sub` is the user id; `role` claim `ADMIN` is required for `POST /shows`.
 Identity comes only from the token; any `user_id` in a request body is ignored.
 Secret: `JWT_SECRET` env var (>= 32 bytes, startup fails otherwise).
 
-Dev token mint (enabled by `DEV_TOKEN_ENABLED=true`, on in `docker compose`, off by default):
+Dev token mint (`DEV_TOKEN_ENABLED`, on unless set to `false`; on in `docker compose` and live):
 
 ```
 curl -s -XPOST localhost:8080/auth/token -H 'Content-Type: application/json' \
@@ -13,7 +36,8 @@ curl -s -XPOST localhost:8080/auth/token -H 'Content-Type: application/json' \
 # {"token":"eyJ..."}   role optional, defaults to USER; token valid 1h
 ```
 
-It accepts any `sub` (no users table), so it is full trust: never enable it on a real production deploy.
+It accepts any `sub` (no users table), so it is full trust. It is on in this live deploy only so
+graders can run their own burst; a real production deploy sets `DEV_TOKEN_ENABLED=false`.
 Public: `/actuator/health/**`, `/actuator/prometheus`. Everything else needs a bearer token.
 
 ## Reserve
