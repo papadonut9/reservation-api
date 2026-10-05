@@ -9,6 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.TransactionException;
@@ -48,12 +50,19 @@ public class ApiExceptionHandler {
       }
       if (t instanceof SQLException s && s.getSQLState() != null) {
         if (BUSY.contains(s.getSQLState())) {
+          if ("40P01".equals(s.getSQLState())) {
+            log.warn("deadlock despite fixed lock order", e);
+          }
           return reason(HttpStatus.CONFLICT, "busy");
         }
         if (s.getSQLState().startsWith("08")) {
           return unavailable(e);
         }
       }
+    }
+    // backstop for a lock or timeout failure that arrives without the driver's SQLException
+    if (e instanceof PessimisticLockingFailureException || e instanceof QueryTimeoutException) {
+      return reason(HttpStatus.CONFLICT, "busy");
     }
     if (e instanceof DataIntegrityViolationException) {
       return reason(HttpStatus.CONFLICT, "conflict");
