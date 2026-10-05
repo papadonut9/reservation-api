@@ -1,0 +1,22 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+anchxt:
+  db_host: ${DB_HOST:}
+  db_name: ${DB_NAME:}
+
+spring:
+  flyway:
+    enabled: false
+  datasource:
+    url: jdbc:postgresql://${anchxt.db_host}/${anchxt.db_name}
+    username: ${DB_USERNAME:}
+    password: ${DB_PASSWORD:}
+  jpa:
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          time_zone: Asia/Kolkata
+        default_schema: public
+
