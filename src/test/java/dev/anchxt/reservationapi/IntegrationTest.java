@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -39,6 +40,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
       "app.reserve.admission-wait=2s"
     })
 @AutoConfigureMockMvc
+// tests swap in a simple registry by default; this keeps the real Prometheus one
+@AutoConfigureMetrics
 @Import(IntegrationTest.Db.class)
 abstract class IntegrationTest {
 

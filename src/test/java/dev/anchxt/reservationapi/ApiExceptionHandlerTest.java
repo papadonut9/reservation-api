@@ -1,8 +1,10 @@
 package dev.anchxt.reservationapi;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.SoftAssertions.assertSoftly;
 
 import dev.anchxt.reservationapi.exception.ApiExceptionHandler;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.net.ConnectException;
 import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
@@ -15,6 +17,7 @@ import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.jdbc.UncategorizedSQLException;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.transaction.CannotCreateTransactionException;
 
 /**
@@ -30,7 +33,7 @@ class ApiExceptionHandlerTest {
 
   @Test
   void domainOutcomesAreNever5xx() {
-    var advice = new ApiExceptionHandler();
+    var advice = new ApiExceptionHandler(new SimpleMeterRegistry());
     var cases =
         List.<Map.Entry<RuntimeException, String>>of(
             Map.entry(new DataIntegrityViolationException("x"), "409 conflict"),
@@ -55,11 +58,22 @@ class ApiExceptionHandlerTest {
     assertSoftly(
         soft -> {
           for (var c : cases) {
-            var r = advice.database(c.getKey());
+            var r = advice.database(c.getKey(), new MockHttpServletRequest());
             soft.assertThat(r.getStatusCode().value() + " " + r.getBody().get("reason"))
                 .as(c.getKey().getClass().getSimpleName())
                 .isEqualTo(c.getValue());
           }
         });
+  }
+
+  /** Only reserve declines are reservation outcomes; a busy cancel or GET is not counted. */
+  @Test
+  void onlyReserveDeclinesAreCounted() {
+    var meters = new SimpleMeterRegistry();
+    var advice = new ApiExceptionHandler(meters);
+    advice.database(state("55P03"), new MockHttpServletRequest("POST", "/reservations/x/cancel"));
+    advice.database(state("55P03"), new MockHttpServletRequest("POST", "/shows/1/reserve"));
+    assertThat(meters.get("reservations.declined").tag("reason", "busy").counter().count())
+        .isEqualTo(1.0);
   }
 }

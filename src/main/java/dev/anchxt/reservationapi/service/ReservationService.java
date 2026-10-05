@@ -6,6 +6,8 @@ import dev.anchxt.reservationapi.exception.NotFoundException;
 import dev.anchxt.reservationapi.exception.OverloadedException;
 import dev.anchxt.reservationapi.model.SeatStatus;
 import dev.anchxt.reservationapi.repository.ReservationRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -30,16 +32,21 @@ public class ReservationService {
   private final TransactionTemplate tx;
   private final Semaphore admission;
   private final Duration admissionWait;
+  private final Counter confirmed;
+  private final Counter replayed;
 
   public ReservationService(
       ReservationRepository repo,
       TransactionTemplate tx,
       Semaphore reserveAdmission,
-      @Value("${app.reserve.admission-wait:2s}") Duration admissionWait) {
+      @Value("${app.reserve.admission-wait:2s}") Duration admissionWait,
+      MeterRegistry meters) {
     this.repo = repo;
     this.tx = tx;
     this.admission = reserveAdmission;
     this.admissionWait = admissionWait;
+    this.confirmed = meters.counter("reservations.confirmed");
+    this.replayed = meters.counter("reservations.declined", "reason", "idempotent_replay");
   }
 
   public ReservationView reserve(long showId, String userId, List<String> requested, String key) {
@@ -54,17 +61,21 @@ public class ReservationService {
       Thread.currentThread().interrupt();
       throw new OverloadedException();
     }
+    var id = UUID.randomUUID();
+    ReservationView view;
     // release only what was acquired, trying to release after a failed tryAcquire will mint permits
     try {
-      return claim(showId, userId, seats, requestHash, key);
+      view = claim(id, showId, userId, seats, requestHash, key);
     } finally {
       admission.release();
     }
+    // after commit. A replay returns the stored reservation, never the id minted here
+    (view.reservationId().equals(id) ? confirmed : replayed).increment();
+    return view;
   }
 
   private ReservationView claim(
-      long showId, String userId, List<String> seats, String requestHash, String key) {
-    var id = UUID.randomUUID();
+      UUID id, long showId, String userId, List<String> seats, String requestHash, String key) {
     return Objects.requireNonNull(
         tx.execute(
             s -> {

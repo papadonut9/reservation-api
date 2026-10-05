@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -229,7 +230,7 @@ class ReserveTest extends IntegrationTest {
                           jdbc.sql("SET LOCAL statement_timeout = '1ms'").update();
                           jdbc.sql("SELECT pg_sleep(1)").query().singleRow();
                         }));
-    var response = advice.database(e);
+    var response = advice.database(e, new MockHttpServletRequest());
     assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
     assertThat(response.getBody()).isEqualTo(Map.of("reason", "busy"));
   }
