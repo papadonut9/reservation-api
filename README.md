@@ -102,3 +102,40 @@ if it matches `[A-Za-z0-9-]{8,64}`, otherwise a generated UUID. The id is echoed
 curl -si -XPOST localhost:8080/shows/1/reserve -H 'X-Request-Id: burst-0001' ... | grep X-Request-Id
 docker compose logs app | grep '"requestId":"burst-0001"'
 ```
+
+## Burst
+One command reproduces the on-sale stampede against any deployment and checks the correctness bar:
+
+```
+./burst.sh https://<live-url>                       # same as: java scripts/Burst.java <BASE_URL>
+CONCURRENCY=5000 ./burst.sh http://localhost:8080   # cap in-flight requests (see below)
+```
+
+Needs JDK 21 (single-file source launch, no build, no dependencies). The target must run with
+`DEV_TOKEN_ENABLED=true`: the script mints an admin token to create a fresh show and one user token
+per simulated buyer. Env: `REQUESTS` (default 20000), `CONCURRENCY` (default = `REQUESTS`, all at once).
+
+What one run does:
+1. Waits up to 3 min for `/actuator/health/readiness` (free tiers cold-start).
+2. Creates a fresh show: rows A-T × 50 for the burst, plus rows X/Y/Z reserved for the checks below.
+3. Fires all requests behind one start gate, shuffled together:
+   - hot-seat storm: 500 users each on A10..A14 (A12 included);
+   - front-weighted traffic: 1-4 adjacent seats per request, distinct users;
+   - same key ×20 in parallel (one user, Y1+Y2);
+   - one user firing 10 parallel single-seat reserves at limit 4 (Z1..Z10).
+4. Polls `GET /shows/{id}` during the burst and asserts `available + held + confirmed == total_seats`.
+5. After the burst: same key with different seats, a spoofed body `user_id`, and a cancel of someone
+   else's reservation.
+6. Waits for the 5s gauge refresh, then reconciles `GET /shows/{id}` and `/actuator/prometheus`
+   (deltas over the run) against what the client saw.
+
+It prints an outcome table per group (201 / replay / 409 by reason / 429 / other 4xx / 5xx /
+transport) and PASS/FAIL per bar, and exits 1 on any FAIL. Every request carries
+`X-Request-Id: burst-<run>-<n>`, so `grep burst-<run>` finds the run in the logs.
+
+- A request that gets no answer (connection dropped in front of the app) is retried up to 3 times
+  with the same idempotency key, as a real client would; the run line reports how many.
+- The Prometheus checks assume one instance and no other traffic during the run.
+- One machine cannot hold 20k plain-HTTP connections (Windows runs out of sockets, Tomcat accepts
+  8192), so cap `CONCURRENCY` for local runs. A dropped connection shows as `transport`, never as a
+  server outcome.
