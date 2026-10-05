@@ -97,3 +97,12 @@
 - Caught by AI from human's runs: a Windows client at 20k plain-HTTP connections runs out of sockets, so local runs need a `CONCURRENCY` cap; over HTTPS the JDK client multiplexes onto one h2 connection and fails with "too many concurrent streams" at the proxy's cap, so the script forces HTTP/1.1; token mint failures were silently swallowed and showed up as 401s and passes that tested nothing, so a failed mint now aborts the run; proxy-dropped connections are retried with the same idempotency key. Matching counter deltas proved the dropped requests never reached the app.
 - Caught by AI in the curl version before it was dropped: a trailing `next` in a curl `-K` config is an empty request, so curl rejected the whole file.
 - Result: all PASS at N = 5000, ~610 tx/s, 0 × 429 (WRITEUP "Admission"). Open for IMS-42: rerun against the deployed free tier.
+
+## IMS-42 deploy
+- Decided by human: retire Fly.io (shared-CPU ceiling around N = 8,000, free machines stop when idle) and the bare `java -jar` VM; deploy the repo's own Docker image on a Proxmox Docker host behind Cloudflare, with Postgres on a dedicated node. Human ran the deploy and the live burst.
+- AI checked before writing: a fresh clone of `master` comes up healthy with `docker compose up` (Flyway migrates, readiness UP in ~6s), passes `./mvnw verify`, and passes `./burst.sh` against that stack; live readiness and metrics answer at https://files.anchxt.dev.
+- AI flagged from live metrics: the reported CPU count and heap differ from the compose `mem_limit`, so the README lists the live environment separately; the `prod` profile had Flyway off, so a fresh prod database would have had no tables. Human turned Flyway on in `prod`.
+- AI flagged: the burst numbers pasted for the deploy were the same runs WRITEUP labelled as a 2GB VM; the process start time showed they hit the live container. Human confirmed the runs were on Docker, so environment 3 was relabelled as the deploy, and the heap and CPU were corrected from live metrics.
+- Human decided: keep `fly.toml` (Fly config, `min_machines_running = 1`) even though Fly is not the live deploy.
+- AI decided: README gets live URL, run and deploy sections; README's "dev token off by default" corrected (the default is on); WRITEUP "Where it ran" names the deploy and drops the IMS-42 forward references.
+- Superseded: IMS-40's "logs in Fly's hosted Grafana" no longer applies; live logs access is IMS-43.
