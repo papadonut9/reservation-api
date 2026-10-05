@@ -6,8 +6,8 @@ anchxt:
   db_name: ${DB_NAME:}
 
 spring:
-  flyway:
-    enabled: false
+#  flyway:
+#    enabled: false
   datasource:
     url: jdbc:postgresql://${anchxt.db_host}/${anchxt.db_name}
     username: ${DB_USERNAME:}
