@@ -35,7 +35,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,prometheus,metrics
+        include: health,prometheus
   endpoint:
     health:
       # names only (db, readinessState), no details
