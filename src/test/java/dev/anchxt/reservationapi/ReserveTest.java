@@ -35,21 +35,6 @@ class ReserveTest extends IntegrationTest {
   @Autowired DataSource dataSource;
   @Autowired Semaphore admission;
 
-  String user(String sub) throws Exception {
-    return token("{\"sub\":\"" + sub + "\"}");
-  }
-
-  static String key() {
-    return UUID.randomUUID().toString();
-  }
-
-  String seatStatus(long show, String seat) {
-    return jdbc.sql("SELECT status FROM seats WHERE show_id = ? AND seat_no = ?")
-        .params(show, seat)
-        .query(String.class)
-        .single();
-  }
-
   long reservations(long show) {
     return jdbc.sql("SELECT count(*) FROM reservations WHERE show_id = ?")
         .param(show)
@@ -373,15 +358,6 @@ class ReserveTest extends IntegrationTest {
     // a release after the failed tryAcquire would show up here as permits + 1
     assertThat(admission.availablePermits()).isEqualTo(permits);
     assertThat(reservations(id)).isZero();
-  }
-
-  /** The quota row's count; 0 when no claim for this user and show ever committed. */
-  int held(String sub, long show) {
-    return jdbc.sql("SELECT held FROM user_show_quota WHERE user_id = ? AND show_id = ?")
-        .params(sub, show)
-        .query(Integer.class)
-        .optional()
-        .orElse(0);
   }
 
   int confirmedSeats(String sub, long show) {

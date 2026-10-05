@@ -9,6 +9,7 @@ import com.jayway.jsonpath.JsonPath;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -60,6 +61,30 @@ abstract class IntegrationTest {
             .getResponse()
             .getContentAsString();
     return "Bearer " + JsonPath.read(json, "$.token");
+  }
+
+  String user(String sub) throws Exception {
+    return token("{\"sub\":\"" + sub + "\"}");
+  }
+
+  static String key() {
+    return UUID.randomUUID().toString();
+  }
+
+  String seatStatus(long show, String seat) {
+    return jdbc.sql("SELECT status FROM seats WHERE show_id = ? AND seat_no = ?")
+        .params(show, seat)
+        .query(String.class)
+        .single();
+  }
+
+  /** The quota row's count; 0 when no claim for this user and show ever committed. */
+  int held(String sub, long show) {
+    return jdbc.sql("SELECT held FROM user_show_quota WHERE user_id = ? AND show_id = ?")
+        .params(sub, show)
+        .query(Integer.class)
+        .optional()
+        .orElse(0);
   }
 
   ResultActions createShow(String body) throws Exception {
