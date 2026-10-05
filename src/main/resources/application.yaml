@@ -2,7 +2,7 @@ spring:
   application:
     name: reservation-api
   profiles:
-    default: dev
+    default: ${CONFIG_PROFILE:dev}
   threads:
     virtual:
       enabled: true
@@ -22,11 +22,17 @@ spring:
           authorities-claim-name: role
           authority-prefix: ROLE_
 
+logging:
+  structured:
+    # JSON lines; MDC (requestId) becomes a field on every line
+    format:
+      console: ecs
+
 app:
   jwt:
     secret: ${JWT_SECRET}
   auth:
-    dev-token-enabled: ${DEV_TOKEN_ENABLED:false}
+    dev-token-enabled: ${DEV_TOKEN_ENABLED:true}
   reserve:
     # ceiling, not added latency: ~ client in-flight cap / measured tx/s (WRITEUP "Admission")
     admission-wait: 15s
