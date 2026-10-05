@@ -71,3 +71,11 @@
 - Caught by AI while building: a lock or timeout exception without the driver's `SQLException` in its cause chain fell through to 500, so a type backstop was added (`PessimisticLockingFailureException`, `QueryTimeoutException` → 409 `busy`); mutation-checked, with the backstop removed exactly those three rows fail. Human asked for `DeadlockLoserDataAccessException` to log at WARN; it has been deprecated since Spring 6.0.3 and is no longer thrown, so the WARN keys on SQLState 40P01 instead.
 - Human verified, AI confirmed: the semaphore is already fair (`new Semaphore(permits, true)`) and the timed `tryAcquire` honours fairness. The env override `APP_RESERVE_ADMISSIONWAIT` works through relaxed binding, no code needed. Tests pin the wait at 2s so the drained-semaphore test does not wait 15s.
 - Open for human: the 20k local burst and the measured tx/s need the IMS-41 script; WRITEUP holds them as pending.
+
+## IMS-39 observability: probes and metrics
+- Directed by human: brainstorm IMS-39/40/45 together; IMS-39 first, then IMS-40 with IMS-45 folded in;
+- Human decided, AI accepted: liveness stays process-only and readiness adds `db` (Boot probe groups, no custom indicator); a replay counts as `declined{reason=idempotent_replay}` and never as confirmed, detected by the returned id differing from the id minted for the request (no DTO flag); declines counted in the advice only when the path ends in `/reserve`, so a busy cancel or overloaded GET is not a declined reservation; every reason series is registered at 0 on startup so `increase()` sees the first decline; `overloaded` added to the reason set so 429s reconcile.
+- Human decided: `seats{show_id,status}` is a `MultiGauge` refreshed every 5s from one `GROUP BY` that cross-joins the three statuses, so zeros are reported instead of the series disappearing.
+- Caught while building: Boot test contexts swap in a simple registry, so `/actuator/prometheus` was 404 in tests until `@AutoConfigureMetrics`; `http_server_requests_seconds` only appears after a completed request.
+- Human decided: `/actuator/metrics` dropped from exposure (it was 401 behind auth, and Prometheus covers it).
+- Open for human: readiness → 503 with Postgres stopped is a manual check (stopping the shared Testcontainer would break other tests); WRITEUP "2am alerts" belongs to the burst/deploy tickets.
