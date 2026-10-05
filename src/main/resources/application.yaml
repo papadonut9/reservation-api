@@ -36,3 +36,14 @@ management:
     web:
       exposure:
         include: health,prometheus,metrics
+  endpoint:
+    health:
+      # names only (db, readinessState), no details
+      show-components: always
+      probes:
+        enabled: true
+      group:
+        # liveness stays process-only: a DB outage must not get the app restarted.
+        # readiness fails closed: DB unreachable (pool timeout 2s) -> DOWN -> 503
+        readiness:
+          include: readinessState,db
